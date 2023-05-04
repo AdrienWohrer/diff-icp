@@ -10,23 +10,12 @@ import numpy as np
 
 from matplotlib import pyplot as plt
 
-plt.ion()
-
 import torch
 
-# torch type and device
-use_cuda = torch.cuda.is_available()
-torchdeviceId = torch.device("cuda:0") if use_cuda else "cpu"
-torchdtype = torch.float32
-tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
-torch.manual_seed(1234)
-
-# keops imports
-from pykeops.torch import Vi, Vj
-
-from diffICP.visu import my_scatter, plot_shoot
-
 from scipy.linalg import expm,logm    # matrix exponential and logarithm (to compute affine shooting)
+
+# Torch tensor specifications (GPU vs CPU) : defined in diffICP.kernel
+from diffICP.kernel import torchspec
 
 #####################################################################################################################
 # Encapsulate all the "affine registration logic" in a class
@@ -42,7 +31,7 @@ class AffineModel:
     #############################################################################################
     ### Constructor
 
-    # version = "euclidian", "rigid" (euclidian+scaling), "affine" (general affine), "identity" (no linear part)
+    # version = "rigid" (M=rotation), "similarity" (M=rotation+scaling), "affine" (general affine), "translation" (M=Id)
     # with_t = True/False. Also optimize a translation term (True or False)
     # withlogdet = True/False. Add to the registration energy the logdet of the matrix ("backward" model of registration)
 
@@ -70,6 +59,9 @@ class AffineModel:
 
     def Shoot(self, M, t, X):
 
+        # to be sure
+        M,t,X = M.detach(), t.detach(), X.detach()
+
         Ts = np.linspace(0, 1, self.nt)
         if M.equal(torch.eye(self.D)):
             # only special case that I handle explicitly (for other non-invertibility cases, pray that I'm lucky :))
@@ -78,7 +70,7 @@ class AffineModel:
             # Normal, invertible situation
             Pk = torch.inverse(torch.eye(self.D) - M) @ t
             logM = logm(M, disp=False)[0].real       # ensure real to remove warning
-            return [(Pk[None, :] + (X - Pk[None, :]) @ expm(u * logM).T,) for u in Ts ]     # (tuple format for compatibility with LDDMM)
+            return [( Pk[None,:] + (X-Pk[None,:]) @ torch.tensor(expm(u * logM).T,**torchspec) ,) for u in Ts ]     # (tuple format for compatibility with LDDMM)
 
 
     ### Regularisation energy associated to a given affine transformation (M,t) on point set X
@@ -103,7 +95,7 @@ class AffineModel:
     def Optimize(self, X, Y, z, w=None):
 
         if w is None:
-            w = torch.ones(X.shape[0])
+            w = torch.ones(X.shape[0]).to(**torchspec)
 
         # Just to be sure
         X, Y, z, w = X.detach(), Y.detach(), z.detach(), w.detach()
@@ -121,20 +113,20 @@ class AffineModel:
         B = Yc.t() @ (z[:,None] * Xc)
         c = w.sum()
 
-        if self.version == 'euclidian' or self.version == 'rigid':
-            # Constraint M'*M=Id (euclidian) or lam^2*Id (rigid) ---> SVD solution (see my notes)
-            # U, _, V = torch.svd(B, some=False)             # Pytorch 1.7 (=old) version
+        if self.version == 'rigid' or self.version == 'similarity':
+            # Constraint M'*M=Id (rigid) or lam^2*Id (similarity) ---> SVD solution (see my notes)
+            # U, _, V = torch.svd(B, some=False)             # Pytorch 1.7 version
             # Vh = V.t()                                     # transpose (CAUTION when changing Pytorch version!)
-            U, _, Vh = torch.linalg.svd(B)                 # Pytorch 2.0 (=new) version (not tested)
+            U, _, Vh = torch.linalg.svd(B)                  # Pytorch 2.0 version
             print(f"SVD check : {torch.norm(B - U@torch.diag(_)@Vh)}")
             D = torch.eye(self.D)
-            D[-1,-1] = torch.det(U) * torch.det(Vh)        # ensure that det(R)=1 (rotation)
+            D[-1,-1] = torch.linalg.det(U) * torch.linalg.det(Vh)        # ensure that det(R)=1 (rotation)
             R = U @ D @ Vh
 
-        if self.version == 'euclidian':
+        if self.version == 'rigid':
             M = R
 
-        elif self.version == 'rigid':
+        elif self.version == 'similarity':
             # also optimize scaling factor
             trA = ((Xc**2).sum(-1) * z).sum()
             trBR = (B * R).sum()
@@ -154,8 +146,8 @@ class AffineModel:
                 raise NotImplementedError("General affine registration with term '-c*logdet(M)' not implemented.\n"
                                           "Should find M to minimize E(M) = Tr(A*M*M') - 2*Tr(B'*M) - c*logdet(M)")
 
-        else:   # version = 'identity'
-            M = torch.eye(self.D)
+        else:   # version = 'translation'
+            M = torch.eye(self.D, **torchspec)
 
         if self.with_t:
             t = Ym - M @ Xm
@@ -167,3 +159,18 @@ class AffineModel:
         datal = (((Y-TX)**2).sum(-1) * z).sum()
         regl = self.regloss(M,w)
         return M, t, TX, datal.item(), regl.item()
+
+
+##############################################################
+### Test
+
+if True:
+    print("YOOO")
+    AM = AffineModel(3, version="rigid", withlogdet=True, with_t=True, nt=10)
+    print("YOOO")
+    X = torch.randn(100,3).to(**torchspec)
+    Y = torch.randn(100,3).to(**torchspec)
+    z = torch.ones(100).to(**torchspec)
+    M,t,TX,dl,rl = AM.Optimize(X,Y,z)
+    print(TX, M, t, dl, rl)
+#    print(AM.Shoot(M, t, X))

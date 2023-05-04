@@ -22,22 +22,10 @@ import pykeops
 
 #pykeops.clean_pykeops()
 
-# torch type and device
-use_cuda = torch.cuda.is_available()
-torchdeviceId = torch.device("cuda:0") if use_cuda else "cpu"
-torchdtype = torch.float32
-tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
-
-#torch.manual_seed(0)
-
-# PyKeOps counterpart
-KeOpsdeviceId = torchdeviceId.index  # id of Gpu device (in case Gpu is  used)
-KeOpsdtype = torchdtype.__str__().split(".")[1]  # 'float32'
-
-
 ###################################################################
 # Import from other files in this directory :
 
+from diffICP.kernel import torchspec        # GPU/CPU
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
@@ -54,7 +42,7 @@ savelist = []       # store names of variables to be saved
 
 
 # Plot figures ?
-plotstuff = True
+plotstuff = False
 
 # Number of global loop iterations
 nIter = 20
@@ -69,12 +57,11 @@ nIter = 20
 
 # Simpler and more reproducible : use the spiral formula to draw (deterministic) centroids for GMMg
 C = 20
-t = torch.linspace(0, 2 * np.pi, C + 1)[:-1]
-mu0 = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
-mu0 = mu0.type(torchdtype)
+t = torch.linspace(0, 2 * np.pi, C + 1)[:-1].to(**torchspec)
+mu0 = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1).to(**torchspec)
 
 GMMg = GaussianMixtureUnif(mu0)
-GMMg.sigma = 0.025                  # ad hoc
+GMMg.sigma = 0.025                                          # ad hoc
 GMMg.to_optimize = {'mu':False, 'sigma':False, 'w':False}   # fixed parameters
 
 if plotstuff:
@@ -86,11 +73,11 @@ if plotstuff:
 ###################################################################
 ### "Ground truth" generative LDDMM model
 
-LMg = LDDMMModel(sigma = 0.2,  # sigma of the Gaussian kernel
-                 D=2,  # dimension of space
-                 lambd= 1e2,  # lambda of the LDDMM regularization
+LMg = LDDMMModel(sigma = 0.2,   # sigma of the Gaussian kernel
+                 D=2,           # dimension of space
+                 lambd= 1e2,    # lambda of the LDDMM regularization
                  version = "classic",
-                 nt = 10)                   # time discretization of interval [0,1] for ODE resolution
+                 nt = 10)       # time discretization of interval [0,1] for ODE resolution
 
 
 ###################################################################
