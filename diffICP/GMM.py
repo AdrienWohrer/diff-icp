@@ -9,54 +9,37 @@ import os, time
 import copy
 
 import numpy as np
-rng = np.random.default_rng(seed=1234)
 
 import torch
 from torch.nn import Module
 from torch.nn.functional import softmax, log_softmax
-torch.manual_seed(1234)
 
 from matplotlib import pyplot as plt
 import matplotlib.cm as cm
 
 from pykeops.torch import Vi, Vj, LazyTensor, Pm
-import pykeops
-
-# torch type and device
-use_cuda = torch.cuda.is_available()
-torchdeviceId = torch.device("cuda:0") if use_cuda else "cpu"
-torchdtype = torch.float32
-tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
-torch.manual_seed(1234)
-
-# PyKeOps counterpart
-KeOpsdeviceId = torchdeviceId.index  # id of Gpu device (in case Gpu is used)
-KeOpsdtype = torchdtype.__str__().split(".")[1]  # 'float32'
-
-
-#################################################
-# Import from other files in this directory :
 
 from diffICP.visu import my_scatter
-
+from diffICP.spec import defspec, getspec
 
 #################################################
 # Adaptation de la "GaussianMixture" présentée dans les exemples KeOps (voir z_commente_gaussian_mixture),
 # mais avec des covariances uniformes isotropes sigma^2*Id
 #
 # mu0 = emplacement initial des centroides
-
+# spec = dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
 
 class GaussianMixtureUnif(Module):
-    def __init__(self, mu0):
-        super(GaussianMixtureUnif, self).__init__()				# Adrien : https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
+    def __init__(self, mu0, spec=defspec):
+        super(GaussianMixtureUnif, self).__init__()			# https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
 
         self.params = {}
-        self.mu = mu0.clone().detach()                      # Just to be sure, copy and detach from any computational graph
+        self.spec = spec
+        self.mu = mu0.clone().detach().to(**spec)           # Just to be sure, copy and detach from any computational graph
         self.C, self.D = self.mu.shape
         r = self.mu.var(0).sum().sqrt().item()              # "typical radius" of the cloud of centroids. Hence, each centroid takes a "typical volume" r^D/C
         self.sigma = 0.1 * (r / self.C**(1/self.D))         # 0.1 times the "typical radius" of each centroid
-        self.w = torch.zeros(self.C, 1).type(torchdtype)    # w_c = "score" de chaque composante. Son poids est pi_c = exp(w_c) / sum_{c'} exp(w_{c'})
+        self.w = torch.zeros(self.C, **spec)                # w_c = "score" de chaque composante. Son poids est pi_c = exp(w_c) / sum_{c'} exp(w_{c'})
         self.to_optimize = {
             "sigma" : True,
             "mu" : True,
@@ -74,8 +57,8 @@ class GaussianMixtureUnif(Module):
         
     # Custom deepcopy = copy GMM 
     def __deepcopy__(self, memo):
-        G2 = GaussianMixtureUnif(self.mu)
-        G2.sigma = self.sigma #.clone().detach() # (when sigma was wrapped inside a pytorch tensor. Now a simple float)
+        G2 = GaussianMixtureUnif(self.mu, self.spec)
+        G2.sigma = self.sigma
         G2.w = self.w.clone().detach()
         G2.to_optimize = copy.deepcopy(self.to_optimize)
         return G2
@@ -93,21 +76,18 @@ class GaussianMixtureUnif(Module):
     # - le "free energy offset" Cfe, la partie de l'énergie libre qui ne dépend pas (directement) des valeurs X en entrée
 
     ### Version "PyTorch basique" (pour debug ; peut causer des nan dans le calcul de mu)
-    # TODO: mettre à jour en utilisant les fonctions softmax de pytorch
-    # TODO : séparer en E_step, M_step, comme la version keops
+    # TODO si nécessaire : séparer en E_step, M_step, comme la version keops
 
     def EM_step_pytorch(self,X):
 
         X = X.detach()                                              # to be sure
         N = X.shape[0]
         
-        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)        # shape (N,C)
+        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)                  # shape (N,C)
         # "E step" : mise à jour des 'responsibilities'
-        pi_c = self.w.exp().reshape(self.C)          # plus simple avec une seule dimension (mais la shape (C,1) de w reste nécessaire pour la partie LazyTensors)
-        pi_c = pi_c / pi_c.sum()
-        gamma_nc = pi_c[None,:] * (-D2_nc/(2*self.sigma**2)).exp()  # shape (N,C)
-        gamma_nc = gamma_nc / gamma_nc.sum(1)[:,None]
-        
+        pi_c = softmax(self.w)
+        gamma_nc = softmax( pi_c[None,:]*(-D2_nc/(2*self.sigma**2)) , dim=1)  # shape (N,C)
+
         # "M step" : mise à jour des paramètres GMM
         
         if self.to_optimize["mu"]:
@@ -157,7 +137,8 @@ class GaussianMixtureUnif(Module):
 
         X = X.detach()                              # to be sure
         D2_nc = Vi(X).sqdist(Vj(self.mu))           # Quadratic distances (symbolic Keops matrix)
-        k_nc = Vj(self.w) - D2_nc/(2*self.sigma**2) # log(gamma_nc) avant normalisation
+        k_nc = Vj(self.w.view(self.C,1)) - D2_nc/(2*self.sigma**2)
+                                                    # log(gamma_nc) avant normalisation
         Z_n = k_nc.logsumexp(axis=1)                # exp(Z_n) = sum_c exp(k_nc)
         lgam_nc = k_nc - Vi(Z_n)                    # d'où gamma_nc = exp(lgam_nc) ; et sum_c gamma_nc = 1
         h_c = lgam_nc.logsumexp(axis=0)             # exp(h_c) = N_c = \sum_n gamma_{nc}
@@ -176,8 +157,8 @@ class GaussianMixtureUnif(Module):
 
         if self.to_optimize["w"]:
             if h_c is None:
-                h_c = lgam_nc.logsumexp(axis=0)     # exp(h_c) = N_c = \sum_n gamma_{nc}
-            self.w = h_c - h_c.mean()               # (w = h_c + random constant, chosen here so that w.mean()=0 )
+                h_c = lgam_nc.logsumexp(axis=0)          # exp(h_c) = N_c = \sum_n gamma_{nc}
+            self.w = (h_c - h_c.mean()).view(self.C)     # (w = h_c + random constant, chosen here so that w.mean()=0 )
 
         if self.to_optimize["sigma"]:
             D2_nc = Vi(X).sqdist(Vj(self.mu))           # Quadratic distances (symbolic Keops matrix)
@@ -197,7 +178,7 @@ class GaussianMixtureUnif(Module):
         # "Free energy offset" term (part of the free energy that does not depend directly on the points X)
         # Cfe = sum_n sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) - log(pi_c) + log(gamma_{nc}) ]
 
-        logpi_c = self.w - torch.logsumexp(self.w,0)
+        logpi_c = (self.w - torch.logsumexp(self.w,0)).view(self.C,1)       # keops requires 2D
         if h_c is None:                 # computation not requiring explicitly N_c (a little slower)
             Cfe = N * self.D * np.log(self.sigma) + lgam_nc.sumsoftmaxweight(
                 Vj(self.mu).sqnorm2()/(2* self.sigma**2) - Vi(Y).sqnorm2()/(2* self.sigma**2) - Vj(logpi_c) + lgam_nc, axis=1).sum()
@@ -222,13 +203,16 @@ class GaussianMixtureUnif(Module):
 
     ### Rajout Adrien (uniquement dans le cas des covariances uniformes!)
 
-    def get_sample(self, N):
+    def get_sample(self, N, rng=np.random.default_rng()):
         """Generates a sample of N points."""
-        samp = torch.zeros(N, self.D).normal_(0,self.sigma)     # random normal samples
+        samp = self.sigma * torch.randn(N, self.D, **self.spec)     # random normal samples
         # center around (random) components
-        pi = softmax(self.w,0).numpy().flatten()                # component weights
-        c = rng.multinomial(1,pi,N)                             # random component indices    
-        c = np.where(c==1)[1]
+        # (OLD) numpy version
+        # pi = softmax(self.w,0).numpy().flatten()                    # component weights
+        # c = rng.multinomial(1,pi,N)                                 # random component indices
+        # c = np.where(c==1)[1]
+        # (NEW) Torch version
+        c = torch.distributions.categorical.Categorical(logits=self.w).sample((N,))
         for n in range(N):
             samp[n,:] += self.mu[c[n],:]
         return samp
@@ -241,12 +225,12 @@ class GaussianMixtureUnif(Module):
     ###
     ##################################################
 
-    def update_covariances(self):   # en fait, gamma = *inverse* covariance
+    def update_covariances(self):   # actually, gamma = *inverse* covariance
         """Computes the full covariance matrices from the model's parameters."""
-        self.params["gamma"] = (torch.eye(self.D)*self.sigma**(-2))[None,:,:].repeat([self.C,1,1]).view(self.C,self.D**2)      # TODO CHECK (écrit vite fait)
+        self.params["gamma"] = (torch.eye(self.D, **self.spec) * self.sigma**(-2))[None,:,:].repeat([self.C,1,1]).view(self.C,self.D**2)
 
 #    def covariances_determinants(self): # en fait, det(gamma) = det(Sigma)^(-1)
-#        return self.sigma**(-2*self.D) * torch.ones(self.C).type(dtype)      # TODO CHECK (écrit vite fait)
+#        return self.sigma**(-2*self.D) * torch.ones(self.C)      # TODO CHECK (not tested)
 
     def weights(self):
         """Scalar factor in front of the exponential, in the density formula."""
@@ -258,6 +242,7 @@ class GaussianMixtureUnif(Module):
 
     def likelihoods(self, sample):
         """Samples the density on a given point cloud."""
+        sample = sample.to(**self.spec)
         self.update_covariances()
         return (
             -Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))
@@ -265,9 +250,10 @@ class GaussianMixtureUnif(Module):
 
     def log_likelihoods(self, sample):
         """Log-density, sampled on a given point cloud."""
+        sample = sample.to(**self.spec)
         self.update_covariances()
         K_ij = -Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))
-        return K_ij.logsumexp(dim=1, weight=Vj(self.weights()))
+        return K_ij.logsumexp(dim=1, weight=Vj(self.weights().reshape(self.C,1)))
 
     def neglog_likelihood(self, sample):
         """Returns -log(likelihood(sample)) up to an additive factor."""
@@ -307,7 +293,7 @@ class GaussianMixtureUnif(Module):
         xticks = np.linspace(gmin[0], gmax[0], res + 1)[:-1] #+ 0.5 / res
         yticks = np.linspace(gmin[1], gmax[1], res + 1)[:-1] #+ 0.5 / res
         X, Y = np.meshgrid(xticks, yticks)
-        grid = torch.from_numpy(np.vstack((X.ravel(), Y.ravel())).T).contiguous().type(torchdtype)	
+        grid = torch.from_numpy(np.vstack((X.ravel(), Y.ravel())).T).contiguous()
                 # Adrien : https://stackoverflow.com/questions/48915810/what-does-contiguous-do-in-pytorch
 
         # Heatmap:
@@ -365,7 +351,6 @@ if False:
     t = torch.linspace(0, 2 * np.pi, N + 1)[:-1]
     x = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
     x = x + 0.02 * torch.randn(x.shape)
-    x = x.type(torchdtype)
     
     ## Create datapoints (iris)
     
@@ -389,12 +374,13 @@ if False:
     while n<100:
         n+=1
         print(n)
+        plt.clf()
         GMM.plot(x)
         my_scatter(x)
         
         GMM.EM_step(x)
 #        GMM.EM_step_pytorch(x)
-        print(GMM)
+#        print(GMM)
 #        input()
         plt.pause(.1)
     

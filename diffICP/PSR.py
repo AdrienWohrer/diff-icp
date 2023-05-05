@@ -14,13 +14,6 @@ plt.ion()
 
 import torch
 
-# torch type and device
-use_cuda = torch.cuda.is_available()
-torchdeviceId = torch.device("cuda:0") if use_cuda else "cpu"
-torchdtype = torch.float32
-tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
-torch.manual_seed(1234)
-
 # keops imports
 from pykeops.torch import Vi, Vj
 
@@ -32,6 +25,8 @@ from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.visu import my_scatter, plot_shoot
 from diffICP.decimate import decimate
+from diffICP.spec import defspec, getspec
+
 
 #######################################################################
 ###
@@ -63,14 +58,24 @@ class multiPSR:
     #  - GMMi[s] = GMM model for structure s
     # In any case, the GMMs given as input will be *copied* in the multiPSR object
 
-    def __init__(self, x, GMMi):
+    # - dataspec : spec (dtype+device) under which all point sets are stored (see diffICP/spec.py)
+    # - compspec : spec (dtype+device) under which the actual computations (GMM and registrations) will be performed
+    # These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
+    # but there are too many frames/point sets to store them all on the Gpu (use dataspec["device"]='cpu')
+    # Of course, ideally, everything should be kept on the same device to avoid copies between devices
+
+    def __init__(self, x, GMMi, dataspec=defspec, compspec=defspec):
+
+        self.dataspec, self.compspec = dataspec, compspec
 
         ### Check input format and return various dimensions
 
-        if isinstance(x, tensor):  # single point set (single frame and structure)
+        if isinstance(x, torch.FloatTensor) or isinstance(x, torch.cuda.FloatTensor):
+            # single point set (single frame and structure)
             x = [[x]]
         elif isinstance(x, list):
-            if isinstance(x[0], tensor):  # multiple frames / single structure
+            if isinstance(x[0], torch.FloatTensor) or isinstance(x[0], torch.cuda.FloatTensor):
+                # multiple frames / single structure
                 x = [[xk] for xk in x]
             else:
                 x = [xk.copy() for xk in x]   # copy x as a list of lists (does not copy the data point sets)
@@ -92,10 +97,10 @@ class multiPSR:
             raise ValueError("All point sets should have same axis-1 dimension")
         self.D = allDs[0]
 
-        ### Ensure no gradient information is attached to the input point clouds (and they are contiguous)
+        ### Ensure no gradient information is attached to the input point clouds + contiguous + correct device
         for k in range(self.K):
             for s in range(self.S):
-                x[k][s] = x[k][s].contiguous().detach()
+                x[k][s] = x[k][s].contiguous().detach().to(**self.dataspec)
 
         ### Transform "list of list of list" x into an np.array x0 with dtype=object : self.x0[k,s]
 
@@ -107,6 +112,9 @@ class multiPSR:
 
         ### GMM model for inference (one per structure)
 
+        if GMMi.spec != compspec:
+            raise ValueError("Spec (dtype+device) error : GMM 'spec' and diffPSR 'compspec' attributes should be the same")
+
         if isinstance(GMMi, GaussianMixtureUnif):
             self.GMMi = [copy.deepcopy(GMMi) for s in range(self.S)]
         else:
@@ -116,7 +124,7 @@ class multiPSR:
 
         for s in range(self.S):
             # all (unwarped) points associated to structure s:
-            allx0s = torch.cat(tuple(self.x0[:,s]), dim=0)#.contiguous().detach()
+            allx0s = torch.cat(tuple(self.x0[:,s]), dim=0)
             if self.GMMi[s].to_optimize["mu"]:
                 # initial centroids = close to center of mass of all (unwarped) points
                 self.GMMi[s].mu = allx0s.mean(dim=0) + 0.05 * allx0s.std() * torch.randn(self.GMMi[s].C, self.D)
@@ -125,8 +133,8 @@ class multiPSR:
 
         ### Various required internal state variable
 
-        # self.x1 = copy.deepcopy(self.x0)    # x1[k,s] : registered (warped) point sets
-        # self.y = copy.deepcopy(self.x0)     # y[k,s] : quadratic (GMM E-step) targets for each point
+        # self.x1 = copy.deepcopy(self.x0)    # x1[k,s] : registered (warped) point sets    (stored on dataspec)
+        # self.y = copy.deepcopy(self.x0)     # y[k,s] : quadratic (GMM E-step) targets for each point  (stored on dataspec)
         # longer but safer ?
         self.x1 = np.array([[self.x0[k,s].clone() for s in range(self.S)] for k in range(self.K)], dtype=object)
         self.y = np.array([[self.x0[k,s].clone() for s in range(self.S)] for k in range(self.K)], dtype=object)
@@ -168,7 +176,7 @@ class multiPSR:
     def GMM_opt(self, repeat=1):
 
         for s in range(self.S):
-            allx1s = torch.cat(tuple(self.x1[:,s]), dim=0)
+            allx1s = torch.cat(tuple(self.x1[:,s]), dim=0).to(**self.compspec)
 
             for i in range(repeat):
                 # Possibly repeat several GMM loops on every iteration (since it's faster than LDDMM)
@@ -179,7 +187,7 @@ class multiPSR:
             last = 0
             for k in range(self.K):
                 first, last = last, last + self.N[k,s]
-                self.y[k,s] = allys[first:last]
+                self.y[k,s] = allys[first:last].to(**self.dataspec)
                 #print(f"GMM check : {(self.x1[k,s]-allx1s[first:last]).norm()}")   # test correct indexing
                 # update quadratic losses
                 self.update_quadloss(k,s)
@@ -225,7 +233,7 @@ class multiPSR:
 
         x = [tup[i] for tup in self.shoot[k]]
         for n in range(x[0].shape[0]):
-            xnt = np.array([xt[n, :].tolist() for xt in x])
+            xnt = np.array([xt[n, :].cpu().tolist() for xt in x])
             plt.plot(xnt[:, 0], xnt[:, 1], **kwargs)
 
 
@@ -253,12 +261,14 @@ class diffPSR(multiPSR):
     #   - A warning is issued if some non-support point ends up at a distance > Rcoverwarning*LMi.Kernel.sigma
     #     from all support points, at any time during the shooting procedure (unlike Rdecim which only concerns time t=0)
 
-    def __init__(self, x, GMMi, LMi, Rdecim=None, Rcoverwarning=None):
+    def __init__(self, x, GMMi, LMi, dataspec=defspec, compspec=defspec, Rdecim=None, Rcoverwarning=None):
 
         # Initialize common features of the algorithm (class multiPSR)
-        super().__init__(x, GMMi)
+        super().__init__(x, GMMi, dataspec=dataspec, compspec=compspec)
 
-        # LDDMM Hamitonian system for inference
+        # LDDMM Hamitonian system for inference. Also has a "spec" attribute, although almost useless (see kernel.py)
+        if LMi.spec != compspec:
+            raise ValueError("Spec (dtype+device) error : LDDMMmodel 'spec' and diffPSR 'compspec' attributes should be the same")
         self.LMi = LMi
 
         ### Segregate between support and non-support points for LDDMM shooting (if Rdecim is defined)
@@ -287,16 +297,19 @@ class diffPSR(multiPSR):
         self.q0 = [None] * self.K
         self.remx0 = [None] * self.K
         for k in range(self.K):
-            self.q0[k] = torch.cat(tuple( self.x0[k,s][self.supp_ids[k,s,0]] for s in range(self.S) ), dim=0).contiguous()
-            self.remx0[k] = torch.cat(tuple( self.x0[k,s][self.supp_ids[k,s,1]] for s in range(self.S) ), dim=0).contiguous()
+            self.q0[k] = torch.cat(tuple( self.x0[k,s][self.supp_ids[k,s,0]] for s in range(self.S) ), dim=0
+                                   ).to(**self.compspec).contiguous()
+            self.remx0[k] = torch.cat(tuple( self.x0[k,s][self.supp_ids[k,s,1]] for s in range(self.S) ), dim=0
+                                      ).to(**self.compspec).contiguous()
 
         # Initial LDDMM momenta a0[k] (nota: all structures s are concatenated in a0[k])
         # Start with zero speeds (which is NOT a0=0 in the logdet model!)
         self.a0 = [None] * self.K
         for k in range(self.K):
-            v0 = torch.zeros(self.q0[k].shape)
+            v0 = torch.zeros(self.q0[k].shape, **self.compspec)
             self.a0[k] = self.LMi.v2p(self.q0[k], v0)
             # self.a0[k] = self.LMi.v2p( self.q0[k], v0, alpha=1e-3, version='ridge_keops')
+
 
     ################################################################
     ### Partial optimization, LDDMM part (for each frame k in turn)
@@ -307,11 +320,15 @@ class diffPSR(multiPSR):
     def QuadLossFunctor(self, k):
 
         # quadratic targets (make a contiguous copy to optimize keops reductions)
-        y_supp = torch.cat(tuple( self.y[k,s][self.supp_ids[k,s,0]] for s in range(self.S) ), dim=0).contiguous()
-        y_nonsupp = torch.cat(tuple( self.y[k,s][self.supp_ids[k,s,1]] for s in range(self.S) ), dim=0).contiguous()
+        y_supp = torch.cat(tuple( self.y[k,s][self.supp_ids[k,s,0]] for s in range(self.S) ), dim=0
+                           ).to(**self.compspec).contiguous()
+        y_nonsupp = torch.cat(tuple( self.y[k,s][self.supp_ids[k,s,1]] for s in range(self.S) ), dim=0
+                              ).to(**self.compspec).contiguous()
         # associated sigma values (ugly because depends on s)
-        sig2_supp = torch.cat(tuple( self.GMMi[s].sigma**2 * torch.ones(len(self.supp_ids[k,s,0])) for s in range(self.S) ))
-        sig2_nonsupp = torch.cat(tuple( self.GMMi[s].sigma**2 * torch.ones(len(self.supp_ids[k,s,1])) for s in range(self.S) ))
+        sig2_supp = torch.cat(tuple( self.GMMi[s].sigma**2 * torch.ones(len(self.supp_ids[k,s,0])) for s in range(self.S) )
+                              ).to(**self.compspec).contiguous()
+        sig2_nonsupp = torch.cat(tuple( self.GMMi[s].sigma**2 * torch.ones(len(self.supp_ids[k,s,1])) for s in range(self.S) )
+                                 ).to(**self.compspec).contiguous()
 
         def dataloss_func(q,x):
             return ( (q - y_supp)**2 / (2*sig2_supp[:,None]) ).sum() + ( (x - y_nonsupp)**2 / (2*sig2_nonsupp[:,None]) ).sum()
@@ -334,7 +351,7 @@ class diffPSR(multiPSR):
                 last = 0
                 for s in range(self.S):
                     first, last = last, last + len(self.supp_ids[k,s,u])
-                    self.x1[k,s][self.supp_ids[k,s,u]] = allxk[u][first:last]
+                    self.x1[k,s][self.supp_ids[k,s,u]] = allxk[u][first:last].to(**self.dataspec)
                     # print(f"LDDMM check 1 : {(self.x0[k,s][self.supp_ids[k,s,u]]-testos[u][first:last]).norm()}")   # test correct indexing
 
             # update quadratic losses
@@ -376,10 +393,10 @@ class affinePSR(multiPSR):
     # AffMi = Affine model (and parameters) used in the algorithm, as provided in class AffineModel
     # version = 'euclidian' (rotation+translation), 'rigid' (euclidian+scaling), 'linear' (unconstrained affine)
 
-    def __init__(self, x, GMMi, AffMi):
+    def __init__(self, x, GMMi, AffMi, dataspec=defspec, compspec=defspec):
 
         # Initialize common features of the algorithm (class multiPSR)
-        super().__init__(x, GMMi)
+        super().__init__(x, GMMi, dataspec=dataspec, compspec=compspec)
         self.AffMi = AffMi
         # Affine transform applied to each frame k  (T(x) = M*x+t)
         self.M = [None] * self.K
@@ -393,9 +410,10 @@ class affinePSR(multiPSR):
         for k in range(self.K):
             ### Find best-fitting linear transform for frame k
 
-            X = torch.cat(tuple(self.x0[k,:]), dim=0)   # (N,D)
-            Y = torch.cat(tuple(self.y[k,:]), dim=0)    # (N,D). Must fit Y = X*M' + t'
-            z = torch.cat(tuple( 1/(2*self.GMMi[s].sigma**2) * torch.ones(self.N[k,s]) for s in range(self.S) )) # ugly because depends on s
+            X = torch.cat(tuple(self.x0[k,:]), dim=0).to(**self.compspec)   # (N,D)
+            Y = torch.cat(tuple(self.y[k,:]), dim=0).to(**self.compspec)    # (N,D). Must fit Y = X*M' + t'
+            z = torch.cat(tuple( 1/(2*self.GMMi[s].sigma**2) * torch.ones(self.N[k,s]) for s in range(self.S) )
+                          ).to(**self.compspec)  # ugly because depends on s
 
             self.M[k], self.t[k], TX, datal, self.regloss[k] = self.AffMi.Optimize(X,Y,z)
 
@@ -403,7 +421,7 @@ class affinePSR(multiPSR):
             last = 0
             for s in range(self.S):
                 first, last = last, last + self.N[k,s]
-                self.x1[k,s] = TX[first:last]
+                self.x1[k,s] = TX[first:last].to(**self.dataspec)
 
             ### update quadratic losses (between x1 and targets y)
             for s in range(self.S):

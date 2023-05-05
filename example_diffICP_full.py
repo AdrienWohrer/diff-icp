@@ -28,7 +28,7 @@ torch.manual_seed(1234)
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
-from diffICP.genPSR import diffPSR, affinePSR
+from diffICP.PSR import diffPSR, affinePSR
 from diffICP.visu import my_scatter, plot_shoot
 
 

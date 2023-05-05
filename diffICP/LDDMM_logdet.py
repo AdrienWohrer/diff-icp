@@ -2,40 +2,21 @@
 LDDMM model for point sets (classic or with logdet term)
 '''
 
-# Adapté du script de démonstration des LDDMM dans KeOps, plot_LDDMM_Surface, en rajoutant le terme de logdet.
+# Adapted from the LDDMM demo script of library KeOps :
+# https://www.kernel-operations.io/keops/_auto_tutorials/surface_registration/plot_LDDMM_Surface.html
+# A Wohrer, 2023
 
 
 # Standard imports
 
 import os, time, math
-
 import warnings
 
-import numpy as np
-
-rng = np.random.default_rng(seed=1234)
-
 import torch
-from torch.autograd import grad
-torch.manual_seed(1234)
-
-from pykeops.torch import Vi, Vj, LazyTensor, Pm
-import pykeops
-
-# torch type and device
-use_cuda = torch.cuda.is_available()
-torchdeviceId = torch.device("cuda:0") if use_cuda else "cpu"
-torchdtype = torch.float32
-tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
-# torch.manual_seed(0)
-
-# PyKeOps counterpart
-KeOpsdeviceId = torchdeviceId.index  # id of Gpu device (in case Gpu is  used)
-KeOpsdtype = torchdtype.__str__().split(".")[1]  # 'float32'
-
 
 ### Import kernel reductions, from other file in this directory
 from diffICP.kernel import SVDpow, GaussKernel
+from diffICP.spec import defspec, getspec
 
 
 #####################################################################################################################
@@ -79,11 +60,13 @@ class LDDMMModel:
     #############################################################################################
     ### Constructor
 
-    def __init__(self, sigma=1, D=2, lambd=1, gradcomponent=True, withlogdet=True, version=None,
+    def __init__(self, sigma=1, D=2, lambd=1,
+                 spec=defspec, gradcomponent=True, withlogdet=True, version=None,
                  usetrajcost=True, computversion="keops", nonsupprev=False, nt=10):
 
         # Gaussian kernel: only choice so far
-        self.Kernel = GaussKernel(sigma, D, computversion=computversion)
+        self.spec = spec
+        self.Kernel = GaussKernel(sigma, D, computversion=computversion, spec=spec)     # (variable spec is only used here, to transfer to the kernel)
         self.D = D
         self.lam = lambd
         self.nt = nt
@@ -122,8 +105,9 @@ class LDDMMModel:
     ### Evaluate v at given points x, given vector field parameters (q,p)
 
     def v(self, x, q, p):
+        spec = getspec(x,q,p)
         if x.numel() == 0:  # skip computation if empty
-            return torch.empty(x.shape)
+            return torch.empty(x.shape, **spec)
         if self.eta == 0:   # accelerate computation in this case
             return self.Kernel.KRed(x, q, p)
         else:
@@ -132,8 +116,9 @@ class LDDMMModel:
     ### Evaluate the sum of -div(v) at given points x
 
     def mdivsum(self, x, q, p, rev=False):
+        spec = getspec(x,q,p)
         if x.numel() == 0:  # skip computation if empty
-            return torch.tensor([0.0])
+            return torch.tensor([0.0], **spec)
         if self.eta == 0:   # accelerate computation in this case
             if rev: return self.Kernel.GradKRed_rev(q,x,p).sum()  # (use reverse summation order)
             else: return (p * self.Kernel.GradKRed(q, x)).sum()
@@ -144,7 +129,8 @@ class LDDMMModel:
     ### Return the system Hamitonian
 
     def Hamiltonian(self, q, p):
-        if self.eta == 0:  # accelerate computation in this case
+        getspec(q,p)        # just checking coherent specs (cleaner)
+        if self.eta == 0:   # accelerate computation in this case
             H = 0.5 * (p * self.Kernel.KRed(q, q, p)).sum()
         else:               # H = Asum - eta*Bsum - eta^2 *Csum
             H = 0.5 * (p * self.Kernel.KRed(q, q, p)).sum() \
@@ -158,6 +144,7 @@ class LDDMMModel:
     ### Alternatively: evaluate the "trajcost derivative" (lambda*Hamiltonian(q,p) + mdivsum(q,q,p)) for given values of (q,p)
 
     def dtrajcost(self, q, p):
+        getspec(q,p)            # just checking coherent specs (cleaner)
         if self.eta == 0:       # accelerate computation in this case
             return self.lam * 0.5 * (p * self.Kernel.KRed(q, q, p)).sum()
         else:                   # dtrajcost = lambda*Asum + eta*Csum
@@ -167,6 +154,7 @@ class LDDMMModel:
     # (New version with additional non-support points x)
 
     def ODE(self, q, p, cost, x):
+        spec = getspec(q,p,cost,x)
         # Speeds (support points q + non-support points x)
         vq = self.v(q, q, p)
         vx = self.v(x, q, p)
@@ -188,17 +176,18 @@ class LDDMMModel:
             if self.usetrajcost:
                 dcost = self.dtrajcost(q, p)
             else:
-                dcost = torch.tensor([0.0])
+                dcost = torch.tensor([0.0], **spec)
         return vq, -Gq, dcost, vx
 
 
-    #####################################################################################################
+    ############################# ########################################################################
     ### Conversions between lagrangian speeds (v) and hamiltonian moments (p) based on kernel K(q,q)
     #       v_i = \sum_j K(q_i-q_j)p_j - eta * \sum_j (nablaK)(q_i-q_j)
 
     # WARNING : ill-posed inverse problem in general. Use with caution !
 
     def v2p(self, q, v, rcond=1e-3, alpha=1e-4, version='pinv'):
+        getspec(q,v)      # just checking coherent specs (cleaner)
         if version == 'pinv':
             return self.Kernel.KpinvSolve(q, v + self.eta * self.Kernel.GradKRed(q, q), rcond)
         elif version == 'ridge_keops':
@@ -213,18 +202,19 @@ class LDDMMModel:
     # (Warning: ill-posed in general ; in case of trouble, probably use lower rcond or higher alpha)
 
     def random_p(self, q, rcond=1e-3, alpha=1e-4, version='svd'):
+        spec = getspec(q)
         if self.eta != 0:
             raise ValueError("random_p not implemented yet when gradcomponent=True. (But it shouldn't be too hard!) ")
 
         K = (-(q[:, None, :] - q[None, :, :]) ** 2 / (2 * self.Kernel.sigma ** 2)).sum(-1).exp()
-        zeta = torch.randn(q.shape) / math.sqrt(self.lam)  # zeta ~ N(0,1/lam)
+        zeta = torch.randn(q.shape, **spec) / math.sqrt(self.lam)  # zeta ~ N(0,1/lam)
 
         if version == 'svd':
             return (SVDpow(K, -0.5, rcond) @ zeta).contiguous()
         elif version == 'ridge':
             # return torch.linalg.torch.solve(zeta, torch.cholesky(
             #     K + alpha * torch.eye(K.shape[0]))).solution.contiguous()  # Pytorch 1.7 (=old) commands
-            return torch.linalg.solve(torch.linalg.cholesky(K + alpha* torch.eye(K.shape[0])), zeta).contiguous()  # tentative adrien: torch 2.0
+            return torch.linalg.solve(torch.linalg.cholesky(K + alpha* torch.eye(K.shape[0],**spec)), zeta).contiguous()  # torch 2.0
         else:
             raise ValueError("Unknown version")
 
@@ -235,9 +225,10 @@ class LDDMMModel:
     ### Simulate the geodesic ODE with initial condition (q0,p0)
 
     def Shoot(self, q0, p0, x0=None) :
+        spec = getspec(q0,p0,x0)
         if x0 is None:
-            x0 = torch.empty(0,self.D)
-        cost0 = tensor([0.0])
+            x0 = torch.empty(0,self.D, **spec)
+        cost0 = torch.tensor([0.0], **spec)
         return self.Integrator(self.ODE, (q0, p0, cost0, x0), self.nt)
 
     ### Fonction de dataloss "basique" des LDDMM (utilisée pour avoir une option par défaut)
@@ -267,9 +258,14 @@ class LDDMMModel:
     ### Optimization of E(p0) (trajectory energy for geodesic shooting with initial momenta p0)
     # (New version with additional non-support points x)
 
-    def Optimize(self, dataloss, q0, p0, x0=torch.empty(0), nmax=10, tol=1e-3, errthresh=1e8, **kwargs):
+    def Optimize(self, dataloss, q0, p0, x0=None, nmax=10, tol=1e-3, errthresh=1e8, **kwargs):
 
-        # Necessary to not 'accumulate' computation graph across successive calls to Optimize
+        spec = getspec(q0,p0,x0)
+
+        if x0 is None:
+            x0 = torch.empty(0,self.D, **spec)
+
+        # Necessary to not accumulate computation graph across successive calls to Optimize
         p0 = p0.detach().requires_grad_(True)
         q0 = q0.detach()
         x0 = x0.detach()
@@ -293,9 +289,9 @@ class LDDMMModel:
             optimizer.step(closure)
             L = optimizer.state_dict()["state"][0]["prev_loss"]  # value of L after optimizer step
 
-            if math.isnan(L) or abs(L) > errthresh:       # if aberrant value,
-                ##  p0 = p0prev                           # Option 1 : revert to previous parameters
-                p0 = self.v2p(q0, torch.zeros(q0.shape))  # Option 2 : reset speeds at 0
+            if math.isnan(L) or abs(L) > errthresh:                     # if aberrant value,
+                ##  p0 = p0prev                                         # Option 1 : revert to previous parameters
+                p0 = self.v2p(q0, torch.zeros(q0.shape, **spec))   # Option 2 : reset speeds at 0
                 change = "p0 reset (aberrant L value)"
                 keepOn = False                        # exit the iterations (optimization has failed)
                 warnings.warn("Aberrant or NaN value for loss L during LDDMM optimization.", RuntimeWarning)
@@ -321,27 +317,26 @@ class LDDMMModel:
 
 # Check:
 if False:
+
     M, D, sig, lam = 10, 2, 2.0, 100.0
-    xt = torch.randn(M, D).type(tensor)
-    bt = torch.randn(M, D).type(tensor)
+    xt = torch.randn(M, D, **defspec)
+    bt = torch.randn(M, D, **defspec)
 
-    ##    LDDMM = LDDMMModel(sig,D,lam)
+    LDDMM = LDDMMModel(sig, D, lambd=lam, version="classic")
 
-    ##    vt = LDDMM.p2v(xt,bt)
-    ##    pt = LDDMM.v2p(xt,vt, rcond=None)
-    ##    vback = LDDMM.p2v(xt,pt)
-    ##
-    ##    print(vt)
-    ##    print(vback)    # ok, vt == vback
-    ##    print("yo")
-    ##    print(bt)
-    ##    print(pt)       # but bt != pt, because system has mutiple solutions, and pt has smaller norm than bt
+    vt = LDDMM.v(xt,xt,bt)
+    pt = LDDMM.v2p(xt,vt, rcond=None)
+    vback = LDDMM.v(xt,xt,pt)
+    print(vt)
+    print(vback)    # ok, vt == vback
+    print("yo")
+    print(bt)
+    print(pt)       # but bt != pt, because system has mutiple solutions, and pt has smaller norm than bt
 
-    LDDMM = LDDMMModel(sig, D, lam, version="classic")
+    input()
 
     print(LDDMM.random_p(xt))
     ##    print("yeah")
     ##    print(LDDMM.random_p(xt, version='ridge'))       # fail when N big (matrix singular up to numeric precision)
 
-    input()
     exit()

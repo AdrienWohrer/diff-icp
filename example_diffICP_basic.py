@@ -5,47 +5,44 @@ Basic test case : LDDMM registration of a point set to a fixed GMM model
 import os
 import time
 import numpy as np
-
-import torch
-from torch.nn import Module
-from torch.nn.functional import softmax, log_softmax
-from torch.autograd import grad
-
 from matplotlib import pyplot as plt
-import matplotlib.cm as cm
 plt.ion()
 
-import plotly.graph_objs as go
+import torch
 
 from pykeops.torch import Vi, Vj, LazyTensor, Pm
 import pykeops
 
 #pykeops.clean_pykeops()
 
+# Manual random generator seeds (to always reproduce the same point sets if required)
+torch.random.manual_seed(1234)
+#rng = np.random.default_rng(1234)
+
+
 ###################################################################
 # Import from other files in this directory :
 
-from diffICP.kernel import torchspec        # GPU/CPU
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
-from diffICP.genPSR import diffPSR, affinePSR
+from diffICP.PSR import diffPSR, affinePSR
 from diffICP.visu import my_scatter, plot_shoot
+from diffICP.spec import cpuspec, gpuspec, defspec, getspec
 
 
 ###################################################################
 # Saving simulation results (with dill, a generalization of pickle)
-savestuff = False
+savestuff = True
 import dill
 savefile = "saving/test_basic.pkl"
 savelist = []       # store names of variables to be saved
 
-
 # Plot figures ?
-plotstuff = False
+plotstuff = True
 
 # Number of global loop iterations
-nIter = 20
+nIter = 100
 
 ###################################################################
 ### Part 1 : Synthetic data generation
@@ -57,8 +54,8 @@ nIter = 20
 
 # Simpler and more reproducible : use the spiral formula to draw (deterministic) centroids for GMMg
 C = 20
-t = torch.linspace(0, 2 * np.pi, C + 1)[:-1].to(**torchspec)
-mu0 = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1).to(**torchspec)
+t = torch.linspace(0, 2 * np.pi, C + 1)[:-1]
+mu0 = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
 
 GMMg = GaussianMixtureUnif(mu0)
 GMMg.sigma = 0.025                                          # ad hoc
@@ -79,11 +76,8 @@ LMg = LDDMMModel(sigma = 0.2,   # sigma of the Gaussian kernel
                  version = "classic",
                  nt = 10)       # time discretization of interval [0,1] for ODE resolution
 
-
 ###################################################################
 ### Generate samples
-
-# Nota: .requires_grad_ are no longer necessary, they were there only to compute derivatives of H wrt q
 
 N = 100
 x0g = GMMg.get_sample(N)            # basic GMM sample
@@ -114,73 +108,66 @@ if plotstuff:
 ### Part 2 : Registration on fixed GMM model (new algorithm)
 ###################################################################
 
-### LDDMM Hamitonian system (with logdet term)
+### Point Set Registration model : diffeomorphic version
 
-LMi = {}
-a0_evol = {}
+LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
+                          D=2,                  # dimension of space
+                          lambd= 5e2,           # lambda of the LDDMM regularization
+                          version = "logdet")   # "logdet", "classic" or "hybrid"
+# Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
+PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
+#PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
 
-for ver in ["logdet"]:  #"classic","logdet"]:
+### Point Set Registration model : affine version
 
-    LMi[ver] = LDDMMModel(sigma = 0.2,  # sigma of the Gaussian kernel
-                              D=2,  # dimension of space
-                              lambd= 5e2,  # lambda of the LDDMM regularization
-                              version = ver,
-                              computversion="keops",
-                              nonsupprev = False,   # For testing. Default=False (faster on first tests)
-                              nt = 10)    # time discretization of interval [0,1] for ODE resolution
+# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'rigid'))
+# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'affine', withlogdet=False))
 
-    ### Resulting Point Set Registration model
-    # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-    # PSR = diffPSR(x0, GMMg, LMi[ver], Rdecim=0.7, Rcoverwarning=1)
-    #PSR = diffPSR(x0, GMMg, LMi[ver], Rdecim=None)
+# for storing results
+a0_evol = []
 
-    PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'rigid'))
-    
-    # for storing results
-    a0_evol[ver] = []
-    
-    ### Optimization loop
-    
+### Optimization loop
+
+if plotstuff:
+    plt.figure()
+
+start = time.time()
+for it in range(nIter):
+    print("ITERATION NUMBER ",it)
+
+    ### Store stuff (for saving results to file)
+    # a0_evol[version][it] = current a0 tensor(N,2)
+    if isinstance(PSR, diffPSR):
+        a0_evol.append( PSR.a0[0].clone().detach().cpu() )
+
+    ### E step for GMM model
+    PSR.GMM_opt()
+
+    ###LDDMM step optimization for diffeomorphisms
+    PSR.Reg_opt(tol=1e-5)
+
+    ### Plot resulting point sets (and some trajectories)
+
     if plotstuff:
-        plt.figure()
-
-    start = time.time()
-    for it in range(nIter):
-        print("ITERATION NUMBER ",it)
-
-        ### Store stuff (for saving results to file)
-        # a0_evol[version][it] = current a0 tensor(N,2)
-        if isinstance(PSR, diffPSR):
-            a0_evol[ver].append( PSR.a0[0].clone().detach() )
-
-        ### E step for GMM model        
-        PSR.GMM_opt()
-
-        ###LDDMM step optimization for diffeomorphisms
-        PSR.Reg_opt(tol=1e-5)
-
-        ### Plot resulting point sets (and some trajectories)
-            
-        if plotstuff:
-            plt.clf()
-            x1 = PSR.x1[0,0]
-            GMMg.plot( x0, x1 )
-            my_scatter(x1, alpha=.6, color="r")
-            PSR.plot_trajectories(color='red')
-            PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
-            plt.show()
-            plt.pause(.1)
+        plt.clf()
+        x1 = PSR.x1[0,0]
+        GMMg.plot( x0, x1 )
+        my_scatter(x1, alpha=.6, color="r")
+        PSR.plot_trajectories(color='red')
+        PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
+        plt.show()
+        plt.pause(.1)
 
         #print(PSR.x1[0,0][:5])  # debug
 
-    print(time.time()-start)
+# Done.
 
-savelist.extend(("LMi","a0_evol"))
+print(time.time()-start)
+savelist.extend(("PSR","a0_evol"))
 
 if savestuff:
     print("Saving stuff")
     tosave = {k:globals()[k] for k in savelist}
-    import dill
     with open(savefile, 'wb') as f:
         dill.dump(tosave, f)
         

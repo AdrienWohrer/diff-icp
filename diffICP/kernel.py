@@ -2,44 +2,18 @@
 Kernel and kernel reductions required by the LDDMM framework (only choice for the moment: Gaussian kernel)
 '''
 
+# A Wohrer, 2023
+
 # Standard imports
-
 import numpy as np
-
-rng = np.random.default_rng()
-
 import torch
 
-from pykeops.torch import Vi, Vj, LazyTensor, Pm
+from pykeops.torch import Vi, Vj, Pm
 
 import logging
 logging.basicConfig(level=logging.INFO)
 
-############################################################################################################
-# Device selection : use GPU if available, else CPU
-
-# torch type and device
-use_cuda = torch.cuda.is_available()
-logging.info(f"Can use cuda : {use_cuda}")
-torchdevice = torch.device("cuda:0") if use_cuda else "cpu"
-torchdtype = torch.float32
-
-# PyKeOps counterpart
-KeOpsdevice = torchdevice.index  # id of Gpu device (in case Gpu is  used)
-KeOpsdtype = torchdtype.__str__().split(".")[1]  # 'float32'
-
-# See an example here :
-# https://www.kernel-operations.io/keops/_auto_benchmarks/plot_benchmark_convolutions.html#sphx-glr-auto-benchmarks-plot-benchmark-convolutions-py
-# basically, we need to add, to every manually created torch tensor, the arguments : dtype=torchdtype, device=torchdevice
-# Hence a little shortcut :
-torchspec = {
-    "device": torchdevice,
-    "dtype": torchdtype
-}
-
-# Type of torch tensors used (TODO really useful? Probably safer to use **torchspec above, in general)
-Tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
-
+from diffICP.spec import defspec, getspec
 
 ############################################################################################################
 # Helper function : SVD-based (pseudo-)power of a hermitian matrix 
@@ -48,22 +22,20 @@ Tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
 # rcond = relative cut-off on SVD (warning: big influence on result when alpha<0)
 
 def SVDpow(M, alpha, rcond=None):
-    M = M.detach().cpu().numpy()
-    U, S, Vt = np.linalg.svd(M, full_matrices=False, hermitian=True)
+    U, S, Vh = torch.linalg.svd(M)      # torch 2.0
     if rcond is not None:
         keep = S > rcond * S[0]
     else:
         keep = range(len(S))
-    return torch.tensor(U[:, keep] @ np.diag(S[keep] ** alpha) @ Vt[keep, :], **torchspec)
-
+    return U[:,keep] @ torch.diag(S[keep] ** alpha) @ Vh[keep,:]
 
 # Test
 if False:
-    L = torch.randn((10, 300), **torchspec)
+    L = torch.randn((10, 300), **defspec)
     K = L @ L.t()
     M = SVDpow(K, -0.5, rcond=None)
     print(M @ K @ M)
-
+    exit()
 
 ###############################################################################################################
 # Base class "GenKernel" (virtual, as K_keops, K_pytorch and LapKRed are not implemented)
@@ -145,19 +117,19 @@ class GenKernel:
     def KpinvSolve(self, x, v, rcond=None):
         K_xx = self.K_pytorch(x,x)
         return torch.from_numpy(
-            # Use Numpy's lstsq. Updated version sending the tensor back to GPU if required (not tested)
-            np.linalg.lstsq(K_xx.detach().cpu().numpy(), v.detach().cpu().numpy(), rcond=rcond)[0]
-        ).to(**torchspec)
+            # Use Numpy's lstsq. Updated version sending the tensor back to the same device as x and v (not tested)
+            np.linalg.lstsq(K_xx.numpy(force=True), v.numpy(force=True), rcond=rcond)[0]
+        ).to(**getspec(x,v))
 
     def KridgeSolve_keops(self, x, v, alpha=1e-4):
-        # KeOps one-liner, but problematic (veeeeery long when alpha is small / N is big). TODO GPU-ok ?
+        # KeOps one-liner, but problematic (veeeeery long when alpha is small / N is big). (TODO Not checked on Gpu)
         return self.K_keops(Vi(x), Vj(x)).solve(Vi(v), alpha=alpha)
 
     def KridgeSolve_pytorch(self, x, v, alpha=1e-4):
         # use PyTorch instead (can also be veeery long, so...)
         K_xx = self.K_pytorch(x,x)
 #        return torch.linalg.torch.solve(v, K_xx + alpha * torch.eye(K_xx.shape[0])).solution.contiguous() # torch 1.7 (=old) solve command.
-        return torch.linalg.solve(K_xx + alpha* torch.eye(K_xx.shape[0]), v)    # Newer torch version. TODO GPU-ok ?
+        return torch.linalg.solve(K_xx + alpha* torch.eye(K_xx.shape[0]), v)    # Newer torch version. (TODO Not checked on Gpu)
 
 
 ###############################################################################################################
@@ -176,10 +148,10 @@ class GaussKernel(GenKernel):
     ### Actual kernel (and corresponding Laplacian kernel) formulas : KeOps versions (symbolic lazytensor)
 
     def K_keops(self, x_, y_):
-        return (-(x_.sqdist(y_)) / (2 * self.sigma ** 2)).exp()
+        return (-(x_.sqdist(y_)) / (2 * self.sigma_k ** 2)).exp()
 
     def LapK_keops(self, x_, y_):
-        return self.K_keops(x_,y_) * ( x_.sqdist(y_) / self.sigma ** 4 - self.D / self.sigma ** 2 )
+        return self.K_keops(x_,y_) * ( x_.sqdist(y_) / self.sigma_k ** 4 - self.D_k / self.sigma_k ** 2 )
 
     ### Actual kernel (and corresponding Laplacian kernel) formulas : pytorch versions
 
@@ -196,7 +168,7 @@ class GaussKernel(GenKernel):
 
     # Pytorch tensor reprensenting (\nabla K)(x-y) (used in the pytorch reductions below)
     def GradK_pytorch(self, x, y):
-        return self.K_pytorch(x, y)[:,:,None] * (y[None,:,:]-x[:,None,:])/self.sigma**2
+        return self.K_pytorch(x, y)[:,:,None] * (y[None,:,:]-x[:,None,:]) / self.sigma**2
 
     # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
     def KRed_pytorch(self, x, y, b):
@@ -237,11 +209,18 @@ class GaussKernel(GenKernel):
     ###############
     ### Constructor
 
-    def __init__(self, sigma, D, computversion="keops"):
+    def __init__(self, sigma, D, computversion="keops", spec=defspec):
 
-        # Necessary that D and sigma be converted to torch tensors, so they can be sent to GPU if available
-        self.sigma = torch.tensor(sigma, **torchspec)
-        self.D = torch.tensor(D, **torchspec)
+        self.sigma = sigma
+        self.D = D
+        # A current limitation of KeOps SYMBOLIC lazytensors is that parameters (e.g., for the Gaussian kernel,
+        # dimension D and scale parameter sigma) are treated as CPU objects unless explicitly precised otherwise,
+        # leading to a possible 'CPU/GPU clash'. See question posted here: https://github.com/getkeops/keops/issues/306
+        # Thus, we make torch copies of these parameters with imposed spec (and this is the only role of attribute self.spec):
+        self.sigma_k = Pm(torch.tensor(sigma, **spec))
+        self.D_k = Pm(torch.tensor(D, **spec))
+        self.spec = spec
+
         super().__init__(D)
 
         # Normally unnecessary : hard-coded formula for gradient
@@ -266,18 +245,19 @@ class GaussKernel(GenKernel):
 
 # Check:
 if False:
-    M, N, D, sig = 100, 1000, 2, 2.0
-    xt = torch.randn(M, D).to(**torchspec)
-    yt = torch.randn(N, D).to(**torchspec)
-    bt = torch.randn(N, D).to(**torchspec)
-    vt = torch.randn(M, D).to(**torchspec)
 
-    GK = GaussKernel(sig, D)
+    M, N, D, sig = 100, 1000, 2, 2.0
+    xt = torch.randn(M, D).to(**defspec)
+    yt = torch.randn(N, D).to(**defspec)
+    bt = torch.randn(N, D).to(**defspec)
+    vt = torch.randn(M, D).to(**defspec)
+
+    GK = GaussKernel(sig, D, spec=defspec)
 
     ### Test all reductions (KeOps vs Pytorch versions)
 
-    print(GK.KRed_keops(xt, yt, bt)[:5])  # version KeOps
     print(GK.KRed_pytorch(xt, yt, bt)[:5])  # version PyTorch
+    print(GK.KRed_keops(xt, yt, bt)[:5])  # version KeOps
 
     print(GK.GradKRed_keops(xt, yt)[:5])  # version KeOps
     print(GK.GradKRed_pytorch(xt, yt)[:5])  # version PyTorch
