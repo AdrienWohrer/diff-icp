@@ -97,20 +97,31 @@ class multiPSR:
             raise ValueError("All point sets should have same axis-1 dimension")
         self.D = allDs[0]
 
-        ### Ensure no gradient information is attached to the input point clouds + contiguous + correct device
+        ### Use np.arrays with dtype=object to store the point sets (allows simpler indexing than "list of list of list")
+        # These point sets are stored on the device given by self.dataspec
+
+        # This must be made carefully to avoid unwanted conversions from pytorch to numpy, see
+        # https://github.com/pytorch/pytorch/issues/85606
+        # https://stackoverflow.com/questions/33983053/how-to-create-a-numpy-array-of-lists
+
+        # self.x0[k,s] : unregistered point sets
+        # self.x1[k,s] : registered (warped) point sets
+        # self.y[k,s] : quadratic (GMM E-step) targets for each point
+
+        self.x0 = np.empty((self.K,self.S), dtype=object)
+        self.x1 = np.empty((self.K,self.S), dtype=object)
+        self.y = np.empty((self.K,self.S), dtype=object)
         for k in range(self.K):
             for s in range(self.S):
-                x[k][s] = x[k][s].contiguous().detach().to(**self.dataspec)
+                self.x0[k,s] = x[k][s].contiguous().detach().to(**self.dataspec)
+                self.x1[k,s] = self.x0[k,s].clone()
+                self.y[k,s] = self.x0[k,s].clone()
 
-        ### Transform "list of list of list" x into an np.array x0 with dtype=object : self.x0[k,s]
+        # self.N[k,s] = number of points in point set (k,s)
+        self.N = np.array([[self.x0[k,s].shape[0] for s in range(self.S)] for k in range(self.K)])
 
-        self.x0 = np.array(x, dtype=object)
-        # Nota: if the point sets x themselves were stored as np.arrays (instead of torch tensors), there could be an issue
-        # when all sets have the same length: https://stackoverflow.com/questions/33983053/how-to-create-a-numpy-array-of-lists
 
-        self.N = np.array([[ self.x0[k,s].shape[0] for s in range(self.S)] for k in range(self.K)])
-
-        ### GMM model for inference (one per structure)
+        ### GMM model for inference (one per structure s)
 
         if GMMi.spec != compspec:
             raise ValueError("Spec (dtype+device) error : GMM 'spec' and diffPSR 'compspec' attributes should be the same")
@@ -127,17 +138,11 @@ class multiPSR:
             allx0s = torch.cat(tuple(self.x0[:,s]), dim=0)
             if self.GMMi[s].to_optimize["mu"]:
                 # initial centroids = close to center of mass of all (unwarped) points
-                self.GMMi[s].mu = allx0s.mean(dim=0) + 0.05 * allx0s.std() * torch.randn(self.GMMi[s].C, self.D)
+                self.GMMi[s].mu = allx0s.mean(dim=0) + 0.05 * allx0s.std() * torch.randn(self.GMMi[s].C, self.D, **self.dataspec)
             if self.GMMi[s].to_optimize["sigma"]:
                 self.GMMi[s].sigma = 0.25 * allx0s.std()  # ad hoc
 
-        ### Various required internal state variable
 
-        # self.x1 = copy.deepcopy(self.x0)    # x1[k,s] : registered (warped) point sets    (stored on dataspec)
-        # self.y = copy.deepcopy(self.x0)     # y[k,s] : quadratic (GMM E-step) targets for each point  (stored on dataspec)
-        # longer but safer ?
-        self.x1 = np.array([[self.x0[k,s].clone() for s in range(self.S)] for k in range(self.K)], dtype=object)
-        self.y = np.array([[self.x0[k,s].clone() for s in range(self.S)] for k in range(self.K)], dtype=object)
 
         # The FULL EM free energy writes
         #   F = \sum_{k,s} quadloss[k,s] + \sum_k regloss[k] + \sum_s Cfe[s],
@@ -152,15 +157,23 @@ class multiPSR:
         self.shoot = [None] * self.K
 
 
+    # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
+    # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.dataspec = defspec
+        self.compspec = defspec
+
+
     ################################################################
-    ### For convenience : update quadratic error between point sets x1[k,s] (warped points) and y[k,s] (GMM target points)
+    ### Update quadratic error between point sets x1[k,s] (warped points) and y[k,s] (GMM target points)
 
     def update_quadloss(self, k, s):
         self.quadloss[k,s] = ((self.x1[k,s]-self.y[k,s])**2).sum() / (2 * self.GMMi[s].sigma ** 2)
 
 
     ################################################################
-    ### For convenience : recompute and store current value of free energy
+    ### Recompute and store current value of free energy
 
     def update_FE(self, message=""):
         FE = sum(self.Cfe) + sum(self.regloss) + self.quadloss.sum().item()
@@ -188,7 +201,7 @@ class multiPSR:
             for k in range(self.K):
                 first, last = last, last + self.N[k,s]
                 self.y[k,s] = allys[first:last].to(**self.dataspec)
-                #print(f"GMM check : {(self.x1[k,s]-allx1s[first:last]).norm()}")   # test correct indexing
+                #print(f"GMM check : {(self.x1[k,s]-allx1s[first:last]).norm()}")   # small_tests correct indexing
                 # update quadratic losses
                 self.update_quadloss(k,s)
 
@@ -206,12 +219,33 @@ class multiPSR:
         raise NotImplementedError("function Reg_opt must be written in derived classes.")
 
 
+
     ################################################################
-    ### Visualization of trajectories for frame k
+    ### For convenience : return a "shoot" variable for frame k.
+    # - if params is None, return the PSR model's current shoot variable for frame k : self.shoot[k]
+    # - if params is not None, compute the shoot variable that *would* be associated to registration parameters "param"
+    # (for LDDMM : initial momentum a0k ; for Affine : transformation parameters (M,t) as a tuple). Nota: this computation
+    # remains "external", i.e., it does not affect the current state of the PSR (self.shoot, self.x1, self.a0, etc).
+
+    def get_shoot(self, k=0, params=None):
+        if params is None:
+            return self.shoot[k]
+        elif isinstance(self, diffPSR):
+            a0k = params
+            return self.LMi.Shoot(self.q0[k], a0k, self.remx0[k])
+        elif isinstance(self, affinePSR):
+            M,t = params
+            Xk = torch.cat(tuple(self.x0[k, :]), dim=0)
+            return self.AffMi.Shoot(M, t, Xk)
+
+
+    ################################################################
+    ### For convencience : visualization of trajectories for frame k
     # support=True only used in derived class diffPSR, to visualize trajectories of support points only
+    # shoot = shoot variable containing the trajectories. By default, self.shoot[k]
     # kwargs = plotting arguments
 
-    def plot_trajectories(self, k=0, support=False, **kwargs):
+    def plot_trajectories(self, k=0, support=False, shoot=None, **kwargs):
 
         # Some default plotting values
         if "alpha" not in kwargs.keys():
@@ -231,11 +265,13 @@ class multiPSR:
             else:
                 i = 0
 
-        x = [tup[i] for tup in self.shoot[k]]
+        if shoot is None:
+            shoot = self.shoot[k]
+
+        x = [tup[i] for tup in shoot]
         for n in range(x[0].shape[0]):
             xnt = np.array([xt[n, :].cpu().tolist() for xt in x])
             plt.plot(xnt[:, 0], xnt[:, 1], **kwargs)
-
 
 
 #######################################################################
@@ -342,7 +378,8 @@ class diffPSR(multiPSR):
         for k in range(self.K):
             ### Optimize a0[k] (the long line!)
             self.a0[k], self.shoot[k], self.regloss[k], datal, isteps, change = \
-                self.LMi.Optimize(self.QuadLossFunctor(k), self.q0[k], self.a0[k], self.remx0[k], nmax=nmax, tol=tol)
+                self.LMi.Optimize(self.QuadLossFunctor(k), self.q0[k], self.a0[k], self.remx0[k], tol=tol, nmax=nmax)
+
             # re-assign to corresponding structures
             qk, remxk = self.shoot[k][-1][0], self.shoot[k][-1][3]
             allxk = [qk, remxk]
@@ -352,13 +389,13 @@ class diffPSR(multiPSR):
                 for s in range(self.S):
                     first, last = last, last + len(self.supp_ids[k,s,u])
                     self.x1[k,s][self.supp_ids[k,s,u]] = allxk[u][first:last].to(**self.dataspec)
-                    # print(f"LDDMM check 1 : {(self.x0[k,s][self.supp_ids[k,s,u]]-testos[u][first:last]).norm()}")   # test correct indexing
+                    # print(f"LDDMM check 1 : {(self.x0[k,s][self.supp_ids[k,s,u]]-testos[u][first:last]).norm()}")   # small_tests correct indexing
 
             # update quadratic losses
             for s in range(self.S):
                 self.update_quadloss(k,s)
 
-            # print("LDDMM check 2 : ", datal, " = ", self.quadloss[k,:].sum().item())  # test that quadlosses are well computed and compatible
+            # print("LDDMM check 2 : ", datal, " = ", self.quadloss[k,:].sum().item())  # small_tests that quadlosses are well computed and compatible
 
             # Report for this frame, print full free energy (to check that it only decreases!)
             self.update_FE(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change ={change:.4}.")
@@ -427,7 +464,7 @@ class affinePSR(multiPSR):
             for s in range(self.S):
                 self.update_quadloss(k,s)
 
-            # print("Affine reg check : ", datal, " = ", self.quadloss[k,:].sum().item())  # test that quadlosses are well computed and compatible
+            # print("Affine reg check : ", datal, " = ", self.quadloss[k,:].sum().item())  # small_tests that quadlosses are well computed and compatible
 
             # Compute a representative "shooting", as in the LDDMM case, mainly for plotting purposes.
             self.shoot[k] = self.AffMi.Shoot(self.M[k], self.t[k], X)

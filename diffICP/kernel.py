@@ -111,7 +111,7 @@ class GenKernel:
     # USAGE : GK.KxxxSolve(x,v) --> PyTorch tensor of size (M,D)
     #       --> (b_j) such that v_i = \sum_j K(x_i-x_j)b_j    (or best approximation in some sense)
 
-    # Inverse problem is ill-conditioned in general, so we test two standard methods :
+    # Inverse problem is ill-conditioned in general, so we small_tests two standard methods :
     # (1) lstsq/pseudo-inverse based on SVD, or (2) add a small ridge term: K + alpha*Id
 
     def KpinvSolve(self, x, v, rcond=None):
@@ -240,6 +240,11 @@ class GaussKernel(GenKernel):
         else:
             raise ValueError("unkown version")
 
+    # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
+    # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.spec = defspec
 
 # ------------------
 

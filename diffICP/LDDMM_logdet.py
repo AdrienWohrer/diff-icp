@@ -93,6 +93,14 @@ class LDDMMModel:
         # Ralston integrator : only choice so far
         self.Integrator = RalstonIntegrator()
 
+
+    # "Post-creation" function when Unpickling with pickle/dill. See https://docs.python.org/3/library/pickle.html#handling-stateful-objects
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.spec = defspec                        # use local spec (type/device) for torch tensors
+        self.Integrator = RalstonIntegrator()      # necessary to redefine because dill doesn't serialize function attributes well enough
+
+
     #####################################################################################################################
     # LDDMM Hamiltonian functions
 
@@ -271,33 +279,78 @@ class LDDMMModel:
         x0 = x0.detach()
         # Warning: any external pytorch tensor serving as parameters in dataloss(q,x) should also be detached (see example in QuadLoss above)
 
-        optimizer = torch.optim.LBFGS([p0], max_eval=10, max_iter=10, **kwargs)
+        # optimizer = torch.optim.LBFGS([p0], max_eval=10, max_iter=10, history_size=100, **kwargs) # original values
+        optimizer = torch.optim.LBFGS([p0], max_iter=20, max_eval=100, history_size=100, line_search_fn="strong_wolfe", **kwargs)     # try stuff
+        # optimizer = torch.optim.Adam([p0], lr=0.001)     # try stuff... meh
+        # optimizer = torch.optim.SGD([p0], lr=0.00001)     # try stuff... crap
+        # optimizer = torch.optim.RMSprop([p0])     # try stuff... meh
 
-        def closure():
-            # En PyTorch il faut "remettre les grad à 0" entre chaque appel de la fonction backward(), sinon ils s'accumulent
-            optimizer.zero_grad()
+        # Keep some track of the optimizer's repeated function evaluations during this step (for manual debug and handling of exceptions)
+        iter_L, best_L, best_p0 = [], None, None
+
+        def closure(opt=True):
+            if opt:
+                optimizer.zero_grad()       # reset grads to 0 between every call to function .backward()
             shoot = self.Shoot(q0, p0, x0)
             q,_,_,x = shoot[-1]
             L = self.trajloss(shoot) + dataloss(q,x)
-            L.backward()        # Met à jour les gradients de toute la chaîne de quantités qui dépendent de p0
+            if opt:
+                L.backward()                # Update gradients of all the chain of computations from p0 to L
+                Ld = L.detach().item()      # manual tracking of function evaluations and parameters
+                iter_L.append(Ld)           # list of all values of L encountered during current optimizer step
+                nonlocal best_L, best_p0    # https://stackoverflow.com/questions/64323757/why-does-python-3-8-0-allow-to-change-mutable-types-from-enclosing-function-scop
+                if Ld < best_L :
+                    best_L = Ld
+                    best_p0 = p0.clone().detach()
             return L
 
         i, keepOn = 0, True
         while i < nmax and keepOn:
             i += 1
             p0prev = p0.clone().detach()
-            optimizer.step(closure)
-            L = optimizer.state_dict()["state"][0]["prev_loss"]  # value of L after optimizer step
+            iter_L, best_L, best_p0 = [], math.inf, None            # keep track of evaluations during optimizer.step
+            # For closure-based optimizer (like LBFGS)
+            optimizer.step(closure)                                 # The long line !
+            Lprev, L = iter_L[0], iter_L[-1]                        # value of L before / after optimizer step
+            # For single-evaluation optimizers (like Adam, SGD...)
+            # L = closure()
+            # optimizer.step()
 
-            if math.isnan(L) or abs(L) > errthresh:                     # if aberrant value,
-                ##  p0 = p0prev                                         # Option 1 : revert to previous parameters
-                p0 = self.v2p(q0, torch.zeros(q0.shape, **spec))   # Option 2 : reset speeds at 0
-                change = "p0 reset (aberrant L value)"
-                keepOn = False                        # exit the iterations (optimization has failed)
-                warnings.warn("Aberrant or NaN value for loss L during LDDMM optimization.", RuntimeWarning)
+            if L > Lprev or L > errthresh or math.isnan(L):
+                # Detect some form of divergent behavior!
+
+                # Print some debug information
+                if math.isnan(L):
+                    print("WARNING: NaN value for loss L during LDDMM optimization.")
+                elif L > errthresh:
+                    print("WARNING: Aberrantly large value for loss L during LDDMM optimization.")
+                elif L > Lprev:
+                    print("WARNING: increase of loss L during L-BGFS optimization of LDDMM cost function.")
+                print(f"iter {i} , all L values during iteration : {iter_L}")
+                print(f"iter {i} , best L value during iteration : {best_L}")
+                print(f"iter {i} , last L value during iteration : {L}")
+
+                # Use some fallback value for p0
+                if best_L < Lprev :
+                    # Some better p0 value than p0prev has been encoutered during the optimizer step --> use it.
+                    p0 = best_p0
+                    print("Exiting current optimization of p0. Found an intermediate 'best_p0' value to use instead.")
+                else:
+                    # Found no better value than p0prev. Try a "compromise" between two imperfect reset strategies:
+                    # Option 1 : revert to previous parameters p0prev ---> but then global optimization loop might get stuck
+                    # Option 2 : reset speeds at 0 --> but then all previous work in the global optimization loops is lost
+                    # p0 = 0.9*p0prev + 0.1*self.v2p(q0, torch.zeros(q0.shape, **spec))
+                    # print("Exiting current optimization of p0. Multiplicative modification of p0 towards zero speeds.")
+                    # Option 3 : add some noise to (initial speeds encoded by) momentum p0prev
+                    rmod = 0.01
+                    p0 = p0prev + rmod * p0prev.std() * self.v2p(q0, torch.randn(q0.shape, **spec))
+                    print(f"Exiting current optimization of p0. Trying a random perturbation of p0 from its current value, with relative strength {rmod}.")
+
+                change = "STOP"
+                keepOn = False                                                      # exit the iterations (optimization has failed)
 
             else:  # normal behavior
-                change = ((p0 - p0prev) ** 2).mean().sqrt().detach().numpy()  # change in parameter value
+                change = ((p0 - p0prev) ** 2).mean().sqrt().detach().cpu().numpy()  # change in parameter value
                 keepOn = change > tol
 
         # Done ! Return p0 as "inert" parameter, without gradient attached (important!)

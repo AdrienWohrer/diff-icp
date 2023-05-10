@@ -1,5 +1,5 @@
 '''
-Testing the full diffGMM algorithm (multiple frames + multiple structures)
+Testing the full diffICP algorithm (multiple frames + multiple structures)
 '''
 
 import os, time, math
@@ -7,46 +7,42 @@ import os, time, math
 import copy
 
 import numpy as np
-rng = np.random.default_rng(1234)
 
 from matplotlib import pyplot as plt
 plt.ion()
 
 import torch
 
-# torch type and device
-use_cuda = torch.cuda.is_available()
-torchdeviceId = torch.device("cuda:0") if use_cuda else "cpu"
-torchdtype = torch.float32
-tensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
-torch.manual_seed(1234)
-
+# Manual random generator seeds (to always reproduce the same point sets if required)
+torch.random.manual_seed(1234)
 
 ###################################################################
-# Import from other files in this directory :
+# Import from diffICP module
 
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
 from diffICP.visu import my_scatter, plot_shoot
+from diffICP.spec import defspec, getspec
 
 
 ###################################################################
 # Saving simulation results (with dill, a generalization of pickle)
 savestuff = False
 import dill
+# Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
+# When the IDE used is Pycharm, this requires to set the default run directory, as follows:
+# Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
+savefile = "saving/test_full.pkl"
 #savefile = "saving/last_registration_multi_lam5e2.pkl"
-savefile = "saving/test_multi.pkl"
 savelist = []       # store names of variables to be saved
 
-
 # Plot figures ?
-plotstuff = True
+plotstuff = False
 
 # Number of global loop iterations
 nIter = 30
-
 
 
 ###################################################################
@@ -59,7 +55,6 @@ nIter = 30
 
 GMMg = [None]*3
 
-
 # number of structures
 S = 3
 # number of clusters per structure
@@ -68,22 +63,18 @@ t = torch.linspace(0, 2 * np.pi, C + 1)[:-1]
 
 # first structure
 mu = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
-mu = mu.type(torchdtype)
 GMMg[0] = GaussianMixtureUnif(mu)
 GMMg[0].sigma = 0.025          # ad hoc
 
 # second structure
 mu = torch.stack((1 + 0.4 * t.cos(), 0.5 + 0.4 * t.sin()), 1)
-mu = mu.type(torchdtype)
 GMMg[1] = GaussianMixtureUnif(mu)
 GMMg[1].sigma = 0.04          # ad hoc
 
 # third structure
 mu = torch.stack( (0.8 + 0.1 * (t - np.pi), -0.06* (t - np.pi)), 1)
-mu = mu.type(torchdtype)
 GMMg[2] = GaussianMixtureUnif(mu)
 GMMg[2].sigma = 0.2          # ad hoc
-
 
 if plotstuff:
     plt.figure(S)
@@ -111,21 +102,15 @@ savelist.extend(("GMMg","LMg","K","Nk","x0"))
 reload = False
 
 if reload:
-    # Load from a previous simulation file
-
-    loadfile = "saving/registration_multi_1.pkl"
-    print("Loading data points from previous file : ",loadfile)
-    with open(loadfile, 'rb') as f:
-        yo = dill.load(f)
-    for key in savelist:
-        globals()[key] = yo[key]
+    # Load from a previous simulation file (TODO if necessary)
+    ...
 
 else:
     # Generate new samples
 
     K = 10                                      # Number of frames
     Nkbounds = 40,50                            # Bounds on the number of points in each point set
-    Nk = rng.integers(*Nkbounds,size=(K,S))     # (Random) number of points in each point set
+    Nk = torch.randint(*Nkbounds, (K,S))        # (Random) number of points in each point set
 
     x0 = [None] * K
     for k in range(K):
@@ -142,7 +127,7 @@ else:
             x0[k][s] = shoot[-1][0]                 # arrival (deformed) points
 
             # Test : what is the effect of having some empty structures ?
-            # if rng.random() < 0.1 :
+            # if torch.random() < 0.1 :
             #     x0[k][s] = torch.empty(0,2)
             #     Nk[k,s] = 0
 
@@ -164,91 +149,74 @@ if plotstuff:
 
 
 ###################################################################
-### Part 2 : Registration/inference (new diffGMM algorithm)
+### Part 2 : Registration/inference (new diffICP algorithm)
 ###################################################################
 
+### GMM model
 
-LMi = {}        # two versions
-GMMi_evol = {}  # to store results
-a0_evol = {}    # idem
+C = 20
+GMMi = GaussianMixtureUnif(torch.zeros(C,2))    # initial value for mu = whatever (will be changed by PSR algo)
+GMMi.to_optimize = {
+    "mu" : True,
+    "sigma" : True,
+    "w" : True
+}
 
-for ver in ["logdet"]: #,"classic"]:
+### Point Set Registration model : diffeomorphic version
 
-    ### LDDMM model parameters (two versions)
+LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
+                          D=2,                  # dimension of space
+                          lambd= 5e2,           # lambda of the LDDMM regularization
+                          version = "logdet")   # "logdet", "classic" or "hybrid"
 
-    LMi[ver] = LDDMMModel(sigma = 0.2,  # sigma of the Gaussian kernel
-                          D=2,  # dimension of space
-                          lambd= 5e2,  # lambda of the LDDMM regularization
-                          version = ver,
-                          computversion = "keops",    # For testing. Default="keops"
-                          #nonsupprev = True,   # For testing. Default=False (faster on first tests)
-                          nt = 10)                   # time discretization of interval [0,1] for ODE resolution
+# Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
+# PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
+PSR = diffPSR(x0, GMMi, LMi, Rdecim=None)
 
-    # Définition à la main d'un "hybride", sans gradcomponent mais avec divcost
-    # LMi[ver] = LDDMMModel(sigma= 0.2,  # sigma of the Gaussian kernel
-    #                       D=2,  # dimension of space
-    #                       lambd= 5e2,  # lambda of the LDDMM regularization
-    #                       gradcomponent = False,
-    #                       withlogdet = True,
-    #                       usetrajcost = True,
-    #                       nt = 10)                   # time discretization of interval [0,1] for ODE resolution
+### Point Set Registration model : affine version
 
-    ### GMM model
+# PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'rigid'))
+# PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'affine', withlogdet=False))
 
-    C = 20
-    GMMi = GaussianMixtureUnif(torch.zeros(C,2))    # initial value for mu = whatever (will be changed by PSR algo)
-    GMMi.to_optimize = {
-        "mu" : True,
-        "sigma" : True,
-        "w" : True
-    }
+# for storing results
+a0_evol = []
+GMMi_evol = []
 
-    ### Resulting Point Set Registration model
-    # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-    # PSR = diffPSR(x0, GMMi, LMi[ver], Rdecim=0.7, Rcoverwarning=1)
-    # PSR = diffPSR(x0, GMMi, LMi[ver], Rdecim=None)
+### Optimization loop
 
-    PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'euclidian'))
+for it in range(nIter):
+    print("ITERATION NUMBER ",it)
 
-    ### Optimization loop
+    ### Store stuff (for saving results to file)
+    # GMMi_evol[version][it][s] = current GMMi objects
+    # a0_evol[version][it][k] = current a0 tensor(Nk[k],2)
 
-    # to store results
-    GMMi_evol[ver] = []
-    a0_evol[ver] = []
-    
-    for it in range(nIter):
-        print("ITERATION NUMBER ",it)
-        
-        ### Store stuff (for saving results to file)
-        # GMMi_evol[version][it][s] = current GMMi objects
-        # a0_evol[version][it][k] = current a0 tensor(Nk[k],2)
-        
-        GMMi_evol[ver].append( [ copy.deepcopy( PSR.GMMi[s] ) for s in range(S) ] )
-        if isinstance(PSR, diffPSR):
-            a0_evol[ver].append( [ a0k.clone() for a0k in PSR.a0 ] )
-        
-        ### EM step for GMM model        
-        PSR.GMM_opt(repeat=10)
-        
-        ### M step optimization for diffeomorphisms (individually for each k)
-        PSR.Reg_opt(tol=1e-5)
+    GMMi_evol.append( [ copy.deepcopy( PSR.GMMi[s] ) for s in range(S) ] )
+    if isinstance(PSR, diffPSR):
+        a0_evol.append( [ a0k.clone() for a0k in PSR.a0 ] )
 
-        ### Plot resulting point sets (and some trajectories)
-            
-        if plotstuff:
-            plt.figure(S+1)
-            plt.clf()
-            for s in range(S):
-                x0s = [ xk[s] for xk in x0 ]
-                x1s = PSR.x1[:,s]
-                PSR.GMMi[s].plot(*x0s, *x1s, bounds=[0,2, -0.5,1.5], heatmap=False, color=f"C{s}")
-                my_scatter(*x1s[:4], alpha=.6)
-            for k in range(4):
-                ... # if trajectories are too cluttered
-                #PSR.plot_trajectories(k)
-                #PSR.plot_trajectories(k, support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
-            plt.show()
-            plt.pause(.1)
+    ### EM step for GMM model
+    PSR.GMM_opt(repeat=10)
+
+    ### M step optimization for diffeomorphisms (individually for each k)
+    PSR.Reg_opt(tol=1e-5)
+
+    ### Plot resulting point sets (and some trajectories)
+
+    if plotstuff:
+        plt.figure(S+1)
+        plt.clf()
+        for s in range(S):
+            x0s = [ xk[s] for xk in x0 ]
+            x1s = PSR.x1[:,s]
+            PSR.GMMi[s].plot(*x0s, *x1s, bounds=[0,2, -0.5,1.5], heatmap=False, color=f"C{s}")
+            my_scatter(*x1s[:4], alpha=.6)
+        for k in range(4):
+            ... # if trajectories are too cluttered
+            #PSR.plot_trajectories(k)
+            #PSR.plot_trajectories(k, support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
+        plt.show()
+        plt.pause(.1)
 
 # Done !
 
@@ -257,7 +225,6 @@ savelist.extend(("LMi","mu0","GMMi_evol","a0_evol"))
 if savestuff:
     print("Saving stuff")
     tosave = {k:globals()[k] for k in savelist}
-    import dill
     with open(savefile, 'wb') as f:
         dill.dump(tosave, f)
         

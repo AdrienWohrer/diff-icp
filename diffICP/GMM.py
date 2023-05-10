@@ -62,7 +62,13 @@ class GaussianMixtureUnif(Module):
         G2.w = self.w.clone().detach()
         G2.to_optimize = copy.deepcopy(self.to_optimize)
         return G2
-        
+    #
+    # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
+    # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.spec = defspec
+
     #####################################################################
     ###
     ### Les fonctions dont j'ai vraiment besoin ici : algorithme EM

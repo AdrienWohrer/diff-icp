@@ -1,5 +1,5 @@
 '''
-Basic test case : LDDMM registration of a point set to a fixed GMM model
+Basic example : LDDMM registration of a point set to a fixed GMM model
 '''
 
 import os
@@ -17,24 +17,26 @@ import pykeops
 
 # Manual random generator seeds (to always reproduce the same point sets if required)
 torch.random.manual_seed(1234)
-#rng = np.random.default_rng(1234)
 
 
 ###################################################################
-# Import from other files in this directory :
+# Import from diffICP module
 
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
 from diffICP.visu import my_scatter, plot_shoot
-from diffICP.spec import cpuspec, gpuspec, defspec, getspec
+from diffICP.spec import defspec, getspec
 
 
 ###################################################################
 # Saving simulation results (with dill, a generalization of pickle)
 savestuff = True
 import dill
+# Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
+# When the IDE used is Pycharm, this requires to set the default run directory, as follows:
+# Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
 savefile = "saving/test_basic.pkl"
 savelist = []       # store names of variables to be saved
 
@@ -42,7 +44,7 @@ savelist = []       # store names of variables to be saved
 plotstuff = True
 
 # Number of global loop iterations
-nIter = 100
+nIter = 30
 
 ###################################################################
 ### Part 1 : Synthetic data generation
@@ -65,7 +67,6 @@ if plotstuff:
     plt.figure()
     print(GMMg)
     GMMg.plot()
-    plt.show()
 
 ###################################################################
 ### "Ground truth" generative LDDMM model
@@ -79,7 +80,7 @@ LMg = LDDMMModel(sigma = 0.2,   # sigma of the Gaussian kernel
 ###################################################################
 ### Generate samples
 
-N = 100
+N = 300
 x0g = GMMg.get_sample(N)            # basic GMM sample
 # Random deformation moments (from LDDMM model LMg)
 a0g = LMg.random_p(x0g,
@@ -90,7 +91,6 @@ shoot = LMg.Shoot(x0g, a0g)             # shooting !
 x0 = shoot[-1][0]                       # arrival (deformed) points
 
 ### Variables that will be saved (also add a0g and x0g for illustration!)
-
 savelist.extend(("GMMg","LMg","N","x0g","a0g","x0"))
 
 
@@ -101,11 +101,12 @@ if plotstuff:
     plt.figure()
     GMMg.plot(x0g,x0)
     my_scatter(x0)
-    plot_shoot(shoot,color='b')
+#    plot_shoot(shoot,color='b')
+    plt.pause(1)
 
 
 ###################################################################
-### Part 2 : Registration on fixed GMM model (new algorithm)
+### Part 2 : Registration on fixed GMM model (new diffICP algorithm)
 ###################################################################
 
 ### Point Set Registration model : diffeomorphic version
@@ -115,12 +116,13 @@ LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
                           lambd= 5e2,           # lambda of the LDDMM regularization
                           version = "logdet")   # "logdet", "classic" or "hybrid"
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
-#PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
+# PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
+# PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.2, Rcoverwarning=1)
+# PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
 
 ### Point Set Registration model : affine version
 
-# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'rigid'))
+PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'similarity'))
 # PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'affine', withlogdet=False))
 
 # for storing results

@@ -60,13 +60,14 @@ class AffineModel:
         spec = getspec(M,t,X)
 
         Ts = np.linspace(0, 1, self.nt)
-        if M.equal(torch.eye(self.D)):
+        I = torch.eye(self.D, **spec)
+        if M.equal(I):
             # only special case that I handle explicitly (for other non-invertibility cases, pray that I'm lucky :))
             return [ ( X + u * t[None, :], ) for u in Ts ]              # (tuple format for compatibility with LDDMM)
         else:
             # Normal, invertible situation
-            Pk = torch.inverse(torch.eye(self.D) - M) @ t
-            logM = logm(M, disp=False)[0].real       # ensure real to remove warning
+            Pk = torch.inverse(I - M) @ t
+            logM = logm(M.cpu().numpy(), disp=False)[0].real       # ensure real to remove warning
             shoot = []
             for u in Ts:
                 Mu = torch.tensor(expm(u * logM).T, **spec)
