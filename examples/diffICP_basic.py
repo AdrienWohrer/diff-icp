@@ -118,11 +118,11 @@ LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.2, Rcoverwarning=1)
-# PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
+PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
 
 ### Point Set Registration model : affine version
 
-PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'similarity'))
+# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'similarity'))
 # PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'affine', withlogdet=False))
 
 # for storing results
