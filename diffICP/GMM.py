@@ -378,7 +378,7 @@ class GaussianMixtureUnif(Module):
 ############################################################################################
 
     
-if True:
+if False:
     plt.ion()
     
     ## Create datapoints (spiral)
