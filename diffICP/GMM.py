@@ -71,72 +71,102 @@ class GaussianMixtureUnif(Module):
 
     #####################################################################
     ###
-    ### Les fonctions dont j'ai vraiment besoin ici : algorithme EM
+    ### EM algorithm functions
     ###
     #####################################################################
 
-    # X(N,D) : data points
+    # Basic usage :
+    #       Y,Cfe = EM_step(X)
+    # Input :
+    #   - X(N,D) : data points
+    # The function performs ONE alternation of (E step,M step) for fitting the GMM model to the data points X.
+    # E step : compute (log)-responsibilities gamma_nc of each data points X_n to each GMM component c
+    # M step : update GMM parameters based on the new log-responsibilities
+    # Outputs :
+    #   - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c )
+    #   - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values
     #
-    # La fonction renvoie :
-    # - la "cible quadratique" associée à chaque datapoint : y_n = sum_c ( gamma_{nc}*mu_c )
-    # - le "free energy offset" Cfe, la partie de l'énergie libre qui ne dépend pas (directement) des valeurs X en entrée
+    # The following helper function can also be useful :
+    #       lgamma = E_step(X)
+    # lgamma(N,C) are the log-responsibilities log(gamma_{nc}) for X in the current GMM model.
+    #
+    # The functions exist both in "_pytorch" versions (plain pytorch, manipulating large 2D arrays)
+    # and "keops" versions (faster, use symbolic 2D LazyTensors---but as a drawback the LazyTensors cannot be used directly)
 
-    ### Version "PyTorch basique" (pour debug ; peut causer des nan dans le calcul de mu)
-    # TODO si nécessaire : séparer en E_step, M_step, comme la version keops
+    ### Basic PyTorch versions
+    ##########################
+
+    # The responsibilities gamma_nc of each centroid mu_c for each data point X_n are coded by their log lgamma_nc. Thus (in Pytorch),
+    #       gamma_nc = lgamma_nc.exp()
+    # Similarly, component priors are encoded by the SCORES w_c such that pi_c = exp(w_c) / sum_{c'} exp(w_{c'}). Thus (in Pytorch),
+    #       pi = w.softmax()
+    #       logpi = w - w.logsumexp()
+    #
+    # Reductions over either dimension (N or C) can be performed, e.g., as:
+    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = (softmax(lgamma_nc,dim=0) * stuff).sum(dim=0)
+    #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = (lgamma_nc.exp() * stuff).sum(dim=1)
 
     def EM_step_pytorch(self,X):
 
         X = X.detach()                                              # to be sure
         N = X.shape[0]
-        
-        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)                  # shape (N,C)
-        # "E step" : mise à jour des 'responsibilities'
-        pi_c = softmax(self.w)
-        gamma_nc = softmax( pi_c[None,:]*(-D2_nc/(2*self.sigma**2)) , dim=1)  # shape (N,C)
 
-        # "M step" : mise à jour des paramètres GMM
-        
+        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)        # shape (N,C)
+
+        # "E step" : compute responsibilities (using previous GMM parameters)
+
+        lgamma_nc = log_softmax(self.w[None,:] - D2_nc/(2*self.sigma**2), dim=1)  # shape (N,C)
+        gamma_nc = lgamma_nc.exp()
+
+        # "M step" : update GMM parameters
+
         if self.to_optimize["mu"]:
-            self.mu =( (gamma_nc[:,:,None]*X[:,None,:]).sum(0) / gamma_nc[:,:,None].sum(0) ).reshape(self.C,self.D)
-            # warning: can cause nan)
+            self.mu = softmax(lgamma_nc,dim=0).t() @ X      # shape (C,2)
             
         if self.to_optimize["w"]:
-            pi_c = gamma_nc.mean(0)
-            self.w = pi_c.log().reshape(self.C,1)
-            self.w[self.w.isnan()] = -100                # just in case
-            self.w -= self.w.mean()                      # center the scores
-            
+            h_c = lgamma_nc.logsumexp(dim=0)             # exp(h_c) = N_c = \sum_n gamma_{nc}
+            self.w = h_c - h_c.mean()                    # (w = h_c + arbitrary constant, chosen here so that w.mean()=0 )
+
         if self.to_optimize["sigma"]:
             NDsigma2 = (gamma_nc * D2_nc).sum()
             self.sigma = ( NDsigma2/(self.D*N) ).sqrt().item()      # .item() to return a simple float
 
-        # "Cibles quadratiques" Y(N,D)
+        # "Quadratic targets" Y(N,D)
         Y = (gamma_nc[:,:,None] * self.mu[None,:,:]).sum(1).reshape(N,self.D)
 
         # "Free energy offset" term (part of the free energy that does not depend directly on the points X)
         # Cfe = sum_n sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) - log(pi_c) + log(gamma_{nc}) ]
+        logpi_c = self.w - self.w.logsumexp()
         Cfe = (gamma_nc * ( ( (self.mu ** 2).sum(-1)[None,:] - (Y**2).sum(-1)[:,None] ) / (2 * self.sigma ** 2)
-                            + self.D * np.log(self.sigma) - pi_c.log()[None,:] + gamma_nc.log() ) ).sum()
+                            + self.D * np.log(self.sigma) - logpi_c[None,:] + lgamma_nc ) ).sum()
 
         return Y, Cfe.item()
 
+    # NOTA: in this Pytorch version, it would be suboptimal to separate the E_step and M_step in two separate functions,
+    # because both rely on the quadratic distance matrix D2_nc, that should better be computed only once.
+    # Instead, we provide an *additional* function E_step_pytorch, when one only needs to compute responsibilities.
 
-    ### Versions KeOps équivalentes
-    ###############################
+    ### E step : Compute log-responsibilities (returned as a pytorch 2D array)
 
-    # Les responsabilités gamma_nc de chaque centroïde mu_c sur chaque point X_n sont codées par leur log,
-    # lgam_nc tel que gamma_nc = exp(lgam_nc)
-    # d'où les équivalences:
-    #   res_c = sum_n ( gamma_{nc}*truc(n,c) ) / sum_n gamma_{nc}   --> res = lgam_nc.sumsoftmaxweight(truc,axis=0)
-    #   res_n = sum_c ( gamma_{nc}*truc(n,c) )                      --> res = lgam_nc.sumsoftmaxweight(truc,axis=1)
-    # ou alternativement
-    #   res_c = sum_n ( gamma_{nc}*truc(n,c) )  avec truc > 0       --> res = lgam_nc.logsumexp(weight=truc,axis=0).exp()
+    def E_step_pytorch(self,X):
+
+        X = X.detach()                                                              # to be sure
+        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)                        # shape (N,C)
+        lgamma_nc = log_softmax(self.w[None,:] - D2_nc/(2*self.sigma**2), dim=1)    # shape (N,C)
+        return lgamma_nc
+
+    ### Equivalent KeOps versions
+    #############################
+
+    # Same principle as above, but now responsibilities "lgam_nc" are a SYMBOLIC 2D LazyTensor, so we cannot access its
+    # value directly. Responsibilities are only available through the application of a reduction in either dimension :
     #
-    # De même, les scores w_c sont tels que pi_c = exp(w_c) / sum_{c'} exp(w_{c'}), et donc (en Pytorch)
-    #   pi_c = w.softmax()
-    #   logpi_c = w - w.logsumexp()
+    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = lgam_nc.sumsoftmaxweight(stuff,axis=0)
+    #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = lgam_nc.sumsoftmaxweight(stuff,axis=1)
+    # or alternatively
+    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) )  with stuff > 0       --> res = lgam_nc.logsumexp(weight=stuff,axis=0).exp()
 
-    ### E step : update and return log-responsibilities.
+    ### E step : Compute log-responsibilities (returned as a symbolic keops LazyTensor).
     # For convenience, also compute and return h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
 
     def E_step(self, X):
@@ -144,9 +174,9 @@ class GaussianMixtureUnif(Module):
         X = X.detach()                              # to be sure
         D2_nc = Vi(X).sqdist(Vj(self.mu))           # Quadratic distances (symbolic Keops matrix)
         k_nc = Vj(self.w.view(self.C,1)) - D2_nc/(2*self.sigma**2)
-                                                    # log(gamma_nc) avant normalisation
+                                                    # log(gamma_nc) before normalization
         Z_n = k_nc.logsumexp(axis=1)                # exp(Z_n) = sum_c exp(k_nc)
-        lgam_nc = k_nc - Vi(Z_n)                    # d'où gamma_nc = exp(lgam_nc) ; et sum_c gamma_nc = 1
+        lgam_nc = k_nc - Vi(Z_n)                    # hence gamma_nc = exp(lgam_nc) ; and sum_c gamma_nc = 1
         h_c = lgam_nc.logsumexp(axis=0)             # exp(h_c) = N_c = \sum_n gamma_{nc}
         return lgam_nc, h_c
 
@@ -164,7 +194,7 @@ class GaussianMixtureUnif(Module):
         if self.to_optimize["w"]:
             if h_c is None:
                 h_c = lgam_nc.logsumexp(axis=0)          # exp(h_c) = N_c = \sum_n gamma_{nc}
-            self.w = (h_c - h_c.mean()).view(self.C)     # (w = h_c + random constant, chosen here so that w.mean()=0 )
+            self.w = (h_c - h_c.mean()).view(self.C)     # (w = h_c + arbitrary constant, chosen here so that w.mean()=0 )
 
         if self.to_optimize["sigma"]:
             D2_nc = Vi(X).sqdist(Vj(self.mu))           # Quadratic distances (symbolic Keops matrix)
@@ -207,7 +237,7 @@ class GaussianMixtureUnif(Module):
 
     ##################################################################################################################"
 
-    ### Rajout Adrien (uniquement dans le cas des covariances uniformes!)
+    ### Addition Adrien (only valid in the case of uniform covariances)
 
     def get_sample(self, N, rng=np.random.default_rng()):
         """Generates a sample of N points."""
@@ -227,7 +257,7 @@ class GaussianMixtureUnif(Module):
 
     ##################################################
     ###
-    ### Les fonctions ci-dessous sont conservées principalement pour utiliser la fonctionnalité de plot
+    ### Functions below are taken from a KeOps tutorial. Kept only to the use the plotting function (self.plot() below)
     ###
     ##################################################
 
@@ -348,7 +378,7 @@ class GaussianMixtureUnif(Module):
 ############################################################################################
 
     
-if False:
+if True:
     plt.ion()
     
     ## Create datapoints (spiral)
@@ -357,7 +387,7 @@ if False:
     t = torch.linspace(0, 2 * np.pi, N + 1)[:-1]
     x = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
     x = x + 0.02 * torch.randn(x.shape)
-    
+
     ## Create datapoints (iris)
     
     #from sklearn.datasets import load_iris
@@ -383,8 +413,14 @@ if False:
         plt.clf()
         GMM.plot(x)
         my_scatter(x)
-        
-        GMM.EM_step(x)
+
+        # Compare Pytorch and Keops E steps : OK
+        # lgam_torch = GMM.E_step_pytorch(x)                  # (N,C)
+        # print(softmax(lgam_torch,dim=0).t() @ x)            # (C,2)
+        # lgam_keops,_ = GMM.E_step(x)
+        # print(lgam_keops.sumsoftmaxweight(Vi(x), axis=0).reshape(C,2))
+
+        # GMM.EM_step(x)
 #        GMM.EM_step_pytorch(x)
 #        print(GMM)
 #        input()

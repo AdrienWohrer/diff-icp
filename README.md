@@ -6,18 +6,20 @@
 - Registration functions are **diffeomorphic mappings**, following the *large deviation diffeomorphic metric mapping* (LDDMM) framework.
 - Variations of the same algorithm can be used to register either:
   - One point set on a second point set (the classic ICP problem).
-  - Multiple points sets to a common Gaussian Mixture Model which is inferred from the data.
+  - Multiple point sets to a common Gaussian Mixture Model which is inferred from the data.
   In the medical imaging literature, this is sometimes called *groupwise ICP*, and its result is an example of *statistical atlas*.
 - The optimization problem to be solved is formulated as a classic Bayesian probabilistic inference, with a *prior* term implementing smoothness constraints on the registration mappings.
 - The algorithm is documented in : *A. Wohrer*, **Diffeomorphic ICP registration for single and multiple point sets**, *Geometric Science of Information 2023* (proceedings)
 
 ### Implementation
+
 - Written in Python
 - Runs on CPU (default) or Nvidia GPU (if available), allowing for 10 to 100-fold speed gains
 - Point sets and various operations on them are implemented with the **Torch** library
 - Fast and robust kernel computations are implemented thanks to the **KeOps** library
 
 ### Dependencies
+
 Aside from the classics (scipy, numpy, matplotlib), Python modules **torch** and **pykeops** should be installed (e.g., with pip).
 
 ### Contents
@@ -26,8 +28,7 @@ Directory **diffICP** defines a python module containing the core functions. Mai
   - *GMM.py* handles all Gaussian-Mixture-Model-related functions (e.g., EM algorithm for GMM clustering)
   - *LDDMM_logdet.py* handles the diffeomorphic registration functions
   - *PSR.py* defines the full Point Set Registration algorithm, based on the interplay between the two above.
-  - *Affine_logdet.py* handles alternative registration functions based on affine (e.g., rigid, or more general linear) transformations. This can be used for comparison and/or preprocessing.
-  
+  - *Affine_logdet.py* handles alternative registration functions based on affine (e.g., rigid, or more general linear) transformations. This can be used for comparison and/or preprocessing. 
   
 Directory **examples** contains some use cases
   - *diffICP_basic.py* illustrates registration of a single point set to a known GMM model (Fig. 1 of the GSI article)
@@ -35,5 +36,6 @@ Directory **examples** contains some use cases
   - *diffICP_full.py* illustrates a full model with multiple frames (e.g., patients) *and* multiple GMM models (e.g., brain structures) (not documented in the GSI article)
   
 ### Disclaimer
+
 In its current state, this code is **experimental**, and does not pretend to have reached (yet) the status of a distributable module. The code is provided as is, for whoever may be interested in the algorithms.
 It is only documented through comments in the code (70% english, 30% french :))
