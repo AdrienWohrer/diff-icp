@@ -240,7 +240,7 @@ class multiPSR:
 
 
     ################################################################
-    ### For convencience : visualization of trajectories for frame k
+    ### For convenience : visualization of trajectories for frame k
     # support=True only used in derived class diffPSR, to visualize trajectories of support points only
     # shoot = shoot variable containing the trajectories. By default, self.shoot[k]
     # kwargs = plotting arguments
@@ -272,6 +272,20 @@ class multiPSR:
         for n in range(x[0].shape[0]):
             xnt = np.array([xt[n, :].cpu().tolist() for xt in x])
             plt.plot(xnt[:, 0], xnt[:, 1], **kwargs)
+
+    ################################################################
+    ### For convenience : compute the registration of an external point set X.
+    # Y = register(X,k)
+    # with X(N,D) some input points, and Y(N,D) their registered version, using parameters from frame k.
+    # Remains "external", i.e., it does not affect the current state of the PSR (self.shoot, self.x1, self.a0, etc).
+
+    def register(self, X, k=0):
+        if isinstance(self, diffPSR):
+            shoot = self.LMi.Shoot(self.q0[k], self.a0[k], X)
+            Y = shoot[-1][3]
+        elif isinstance(self, affinePSR):
+            Y = X @ self.M[k].t() + self.t[k][None,:]
+        return Y
 
 
 #######################################################################

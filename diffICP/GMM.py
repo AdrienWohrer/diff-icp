@@ -136,7 +136,7 @@ class GaussianMixtureUnif(Module):
 
         # "Free energy offset" term (part of the free energy that does not depend directly on the points X)
         # Cfe = sum_n sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) - log(pi_c) + log(gamma_{nc}) ]
-        logpi_c = self.w - self.w.logsumexp()
+        logpi_c = self.w - self.w.logsumexp(dim=0)
         Cfe = (gamma_nc * ( ( (self.mu ** 2).sum(-1)[None,:] - (Y**2).sum(-1)[:,None] ) / (2 * self.sigma ** 2)
                             + self.D * np.log(self.sigma) - logpi_c[None,:] + lgamma_nc ) ).sum()
 
