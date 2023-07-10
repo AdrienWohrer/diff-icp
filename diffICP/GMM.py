@@ -17,7 +17,12 @@ from torch.nn.functional import softmax, log_softmax
 from matplotlib import pyplot as plt
 import matplotlib.cm as cm
 
-from pykeops.torch import Vi, Vj, LazyTensor, Pm
+# Look for keops and use it if possible
+import importlib.util
+keops_spec = importlib.util.find_spec("pykeops")
+use_keops = keops_spec is not None
+if use_keops:
+    from pykeops.torch import Vi, Vj, LazyTensor, Pm
 
 from diffICP.visu import my_scatter
 from diffICP.spec import defspec, getspec
