@@ -37,14 +37,14 @@ import dill
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
-savefile = "saving/test_basic.pkl"
+savefile = "saving/test_nokeops_save.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
-plotstuff = True
+plotstuff = False
 
 # Number of global loop iterations
-nIter = 30
+nIter = 1
 
 ###################################################################
 ### Part 1 : Synthetic data generation
@@ -80,7 +80,7 @@ LMg = LDDMMModel(sigma = 0.2,   # sigma of the Gaussian kernel
 ###################################################################
 ### Generate samples
 
-N = 300
+N = 100
 x0g = GMMg.get_sample(N)            # basic GMM sample
 # Random deformation moments (from LDDMM model LMg)
 a0g = LMg.random_p(x0g,
@@ -157,7 +157,7 @@ for it in range(nIter):
         my_scatter(x1, alpha=.6, color="r")
         PSR.plot_trajectories(color='red')
         PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
-        plt.show()
+        #plt.show()
         plt.pause(.1)
 
         #print(PSR.x1[0,0][:5])  # debug

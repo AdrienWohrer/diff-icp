@@ -2,20 +2,14 @@
 Function implementing the "general" version of diffICP algorithm
 '''
 
-import os, time, math
-import copy
+import os, time, math, copy
 import warnings
 
 import numpy as np
-
 from matplotlib import pyplot as plt
-
 plt.ion()
 
 import torch
-
-# keops imports
-from pykeops.torch import Vi, Vj
 
 #######################################################################
 # Import from other files in this directory :
@@ -418,7 +412,7 @@ class diffPSR(multiPSR):
             if self.Rcoverwarning is not None:
                 for t in range(len(self.shoot[k])):
                     qk, remxk = self.shoot[k][t][0], self.shoot[k][t][3]
-                    uncoveredxk = Vi(remxk).sqdist(Vj(qk)).min(axis=1) > (self.Rcoverwarning * self.LMi.Kernel.sigma)**2
+                    uncoveredxk = self.LMi.Kernel.check_coverage(remxk, qk, self.Rcoverwarning)
                     if uncoveredxk.any():
                         print(f"WARNING : shooting, time step {t} : {uncoveredxk.sum()} uncovered points ({uncoveredxk.sum()/remxk.shape[0]:.2%})")
                         warnings.warn("Uncovered points during LDDMM shooting. Check Rdecim and Rcoverwarning values.", RuntimeWarning)

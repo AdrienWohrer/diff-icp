@@ -8,12 +8,20 @@ Kernel and kernel reductions required by the LDDMM framework (only choice for th
 import numpy as np
 import torch
 
-from pykeops.torch import Vi, Vj, Pm
-
 import logging
 logging.basicConfig(level=logging.INFO)
 
+import importlib.util
+
+# Look for keops and use it if possible
+use_keops = importlib.util.find_spec("pykeops") is not None
+if use_keops:
+    from pykeops.torch import Vi, Vj, Pm
+else:
+    print("Warning: pykeops not installed. Consider installing it, if you are on linux")
+
 from diffICP.spec import defspec, getspec
+
 
 ############################################################################################################
 # Helper function : SVD-based (pseudo-)power of a hermitian matrix 
@@ -43,24 +51,26 @@ if False:
 
 class GenKernel:
 
-    # USAGE : GK.K_keops(x_,y_)	    --> LazyTensor symbolic matrix of size (M,N) with values K(x_i-y_j)
-    def K_keops(self, x_, y_):
-        raise NotImplementedError()
-
     # USAGE : GK.K_pytorch(x,y)	    --> Pytorch tensor of size (M,N) with values K(x_i-y_j)
     def K_pytorch(self,x,y):
-        raise NotImplementedError()
-
-    # Nota: the symbolic computation of Laplacian (based on Keops formula for the kernel) is too slow
-    # So the hard-coded formula should be written for each type of Kernel
-
-    # USAGE : GK.LapK_keops(x_,y_)	--> LazyTensor symbolic matrix of size (M,N) with values -Delta K)(x_i-y_j)
-    def LapK_keops(self, x_, y_):
         raise NotImplementedError()
 
     # USAGE : GK.LapK_pytorch(x_,y_)    --> Pytorch tensor of size (M,N) with values -Delta K)(x_i-y_j)
     def LapK_pytorch(self, x_, y_):
         raise NotImplementedError()
+
+    if use_keops:
+
+        # USAGE : GK.K_keops(x_,y_)	    --> LazyTensor symbolic matrix of size (M,N) with values K(x_i-y_j)
+        def K_keops(self, x_, y_):
+            raise NotImplementedError()
+
+        # Nota: the symbolic computation of Laplacian (based on Keops formula for the kernel) is too slow
+        # So the hard-coded formula should be written for each type of Kernel
+
+        # USAGE : GK.LapK_keops(x_,y_)	--> LazyTensor symbolic matrix of size (M,N) with values -Delta K)(x_i-y_j)
+        def LapK_keops(self, x_, y_):
+            raise NotImplementedError()
 
 
     def __init__(self, D):
@@ -68,41 +78,43 @@ class GenKernel:
         ########
         ### Various generic KeOps-based reductions
 
-        x, y, b, c = Vi(0,D), Vj(1,D), Vj(2,D), Vi(3,D)      # Symbolic argument passing (faster)
-        K = self.K_keops(x, y)
+        if use_keops:
 
-        # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
-        self.KRed_keops = (K * b).sum_reduction(axis=1)
+            x, y, b, c = Vi(0,D), Vj(1,D), Vj(2,D), Vi(3,D)      # Symbolic argument passing (faster)
+            K = self.K_keops(x, y)
 
-        # "Gradient of K" reduction
-        # USAGE : GK.GradKRed(x,y)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)
-        self.GradKRed_keops = K.grad(x, 1).sum_reduction(axis=1)
+            # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
+            self.KRed_keops = (K * b).sum_reduction(axis=1)
 
-        # "Reversed summation" version of the preceding
-        # USAGE : GK.GradKRed_rev(x,y,d)    --> PyTorch tensor of size (N,1)  --> Y(i) = \sum_i\sum_d (\partial_d K)(x_i-y_j)d_i^d
-        d = Vi(2, D)
-        self.GradKRed_rev_keops = (K.grad(x,1)*d).sum(-1).sum_reduction(axis=0)
+            # "Gradient of K" reduction
+            # USAGE : GK.GradKRed(x,y)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)
+            self.GradKRed_keops = K.grad(x, 1).sum_reduction(axis=1)
 
-        # "Diagonal Differential" of Kred
-        # USAGE : GK.DDKRed(x,y,b)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)b_j^d
-        self.DDKRed_keops = (K.grad(x, 1)*b).sum_reduction(axis=1)
+            # "Reversed summation" version of the preceding
+            # USAGE : GK.GradKRed_rev(x,y,d)    --> PyTorch tensor of size (N,1)  --> Y(i) = \sum_i\sum_d (\partial_d K)(x_i-y_j)d_i^d
+            d = Vi(2, D)
+            self.GradKRed_rev_keops = (K.grad(x,1)*d).sum(-1).sum_reduction(axis=0)
 
-        # Reduction used for gradient of H
-        # USAGE : GK.GenDKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)(c_i^t b_j)
-        self.GenDKRed_keops = (K.grad(x, 1)*(b*c).sum(-1)).sum_reduction(axis=1)
+            # "Diagonal Differential" of Kred
+            # USAGE : GK.DDKRed(x,y,b)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)b_j^d
+            self.DDKRed_keops = (K.grad(x, 1)*b).sum_reduction(axis=1)
 
-        # Reduction used for gradient of H
-        # USAGE : GK.HessKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial^{(2)}_{de} K)(x_i-y_j)(c_i^e - b_j^e)
-        # Nota: dans la commande T.grad(x,v), ce sont T et v qui doivent avoir la même dimension vectorielle
-        self.HessKRed_keops = K.grad(x,1).grad(x,c-b).sum_reduction(axis=1)
+            # Reduction used for gradient of H
+            # USAGE : GK.GenDKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)(c_i^t b_j)
+            self.GenDKRed_keops = (K.grad(x, 1)*(b*c).sum(-1)).sum_reduction(axis=1)
 
-        # "Laplacian of K" reduction
-        # USAGE : GK.LapKRed(x,y)    --> PyTorch tensor of size (M,1)   --> \sum_j (\Delta K)(x_i-y_j)
-        self.LapKRed_keops = self.LapK_keops(x,y).sum_reduction(axis=1)
+            # Reduction used for gradient of H
+            # USAGE : GK.HessKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial^{(2)}_{de} K)(x_i-y_j)(c_i^e - b_j^e)
+            # Nota: dans la commande T.grad(x,v), ce sont T et v qui doivent avoir la même dimension vectorielle
+            self.HessKRed_keops = K.grad(x,1).grad(x,c-b).sum_reduction(axis=1)
 
-        # "Gradient of Laplacian of K" reduction (like GradKRed, but on (Delta K) instead of K)
-        # USAGE : GK.GradLapKRed(x,y)    --> PyTorch tensor of size (M,D)   --> X(i,d) = \sum_j (\partial_d \Delta K)(x_i-y_j)
-        self.GradLapKRed_keops = self.LapK_keops(x,y).grad(x,1).sum_reduction(axis=1)
+            # "Laplacian of K" reduction
+            # USAGE : GK.LapKRed(x,y)    --> PyTorch tensor of size (M,1)   --> \sum_j (\Delta K)(x_i-y_j)
+            self.LapKRed_keops = self.LapK_keops(x,y).sum_reduction(axis=1)
+
+            # "Gradient of Laplacian of K" reduction (like GradKRed, but on (Delta K) instead of K)
+            # USAGE : GK.GradLapKRed(x,y)    --> PyTorch tensor of size (M,D)   --> X(i,d) = \sum_j (\partial_d \Delta K)(x_i-y_j)
+            self.GradLapKRed_keops = self.LapK_keops(x,y).grad(x,1).sum_reduction(axis=1)
 
 
     #########
@@ -121,15 +133,15 @@ class GenKernel:
             np.linalg.lstsq(K_xx.numpy(force=True), v.numpy(force=True), rcond=rcond)[0]
         ).to(**getspec(x,v))
 
-    def KridgeSolve_keops(self, x, v, alpha=1e-4):
-        # KeOps one-liner, but problematic (veeeeery long when alpha is small / N is big). (TODO Not checked on Gpu)
-        return self.K_keops(Vi(x), Vj(x)).solve(Vi(v), alpha=alpha)
-
     def KridgeSolve_pytorch(self, x, v, alpha=1e-4):
         # use PyTorch instead (can also be veeery long, so...)
         K_xx = self.K_pytorch(x,x)
-#        return torch.linalg.torch.solve(v, K_xx + alpha * torch.eye(K_xx.shape[0])).solution.contiguous() # torch 1.7 (=old) solve command.
         return torch.linalg.solve(K_xx + alpha* torch.eye(K_xx.shape[0]), v)    # Newer torch version. (TODO Not checked on Gpu)
+
+    if use_keops:
+        def KridgeSolve_keops(self, x, v, alpha=1e-4):
+            # KeOps one-liner, but problematic (very long when alpha is small / N is big). (TODO Not checked on Gpu)
+            return self.K_keops(Vi(x), Vj(x)).solve(Vi(v), alpha=alpha)
 
 
 ###############################################################################################################
@@ -144,15 +156,6 @@ class GenKernel:
 
 class GaussKernel(GenKernel):
 
-    #######################
-    ### Actual kernel (and corresponding Laplacian kernel) formulas : KeOps versions (symbolic lazytensor)
-
-    def K_keops(self, x_, y_):
-        return (-(x_.sqdist(y_)) / (2 * self.sigma_k ** 2)).exp()
-
-    def LapK_keops(self, x_, y_):
-        return self.K_keops(x_,y_) * ( x_.sqdist(y_) / self.sigma_k ** 4 - self.D_k / self.sigma_k ** 2 )
-
     ### Actual kernel (and corresponding Laplacian kernel) formulas : pytorch versions
 
     def K_pytorch(self, x, y):
@@ -162,9 +165,19 @@ class GaussKernel(GenKernel):
         D2 = torch.sum((x[:,None,:] - y[None,:,:]) ** 2, -1)
         return torch.exp(-D2 / (2 * self.sigma ** 2)) * (D2 / self.sigma ** 4 - self.D / self.sigma ** 2)
 
+    #######################
+    ### Actual kernel (and corresponding Laplacian kernel) formulas : KeOps versions (symbolic lazytensor)
+
+    if use_keops:
+
+        def K_keops(self, x_, y_):
+            return (-(x_.sqdist(y_)) / (2 * self.sigma_k ** 2)).exp()
+
+        def LapK_keops(self, x_, y_):
+            return self.K_keops(x_,y_) * ( x_.sqdist(y_) / self.sigma_k ** 4 - self.D_k / self.sigma_k ** 2 )
 
     #########################
-    ### PyTorch versions of the Reductions (for speed testing, bugs, double checking, etc.)
+    ### PyTorch versions of the Reductions
 
     # Pytorch tensor reprensenting (\nabla K)(x-y) (used in the pytorch reductions below)
     def GradK_pytorch(self, x, y):
@@ -209,17 +222,23 @@ class GaussKernel(GenKernel):
     ###############
     ### Constructor
 
+    # (computversion argument leaves us the possibility to use "pytorch" formulas even when keops is available)
+
     def __init__(self, sigma, D, computversion="keops", spec=defspec):
 
         self.sigma = sigma
         self.D = D
+        self.spec = spec
+
         # A current limitation of KeOps SYMBOLIC lazytensors is that parameters (e.g., for the Gaussian kernel,
         # dimension D and scale parameter sigma) are treated as CPU objects unless explicitly precised otherwise,
         # leading to a possible 'CPU/GPU clash'. See question posted here: https://github.com/getkeops/keops/issues/306
         # Thus, we make torch copies of these parameters with imposed spec (and this is the only role of attribute self.spec):
-        self.sigma_k = Pm(torch.tensor(sigma, **spec))
-        self.D_k = Pm(torch.tensor(D, **spec))
-        self.spec = spec
+        if use_keops:
+            self.sigma_k = Pm(torch.tensor(sigma, **spec))
+            self.D_k = Pm(torch.tensor(D, **spec))
+        else:
+            computversion="pytorch"     # only choice left in that case
 
         super().__init__(D)
 
@@ -240,6 +259,19 @@ class GaussKernel(GenKernel):
         else:
             raise ValueError("unkown version")
 
+    ###############
+    ### Helper method : check which points X are "covered" by the kernels centered in Y, i.e., at a distance less than
+    # Rthreshold * sigma to one of the points in Y.
+    # TODO if necessary: switch to a more general definition applicable to any kernel (not only Gaussian)
+
+    def check_coverage(self, X, Y, Rthreshold):
+        if use_keops:
+            return Vi(X).sqdist(Vj(Y)).min(axis=1) > (Rthreshold * self.sigma) ** 2
+        else:
+            return ((X[:,None,:]-Y[None,:,:])**2).sum(-1).min(dim=1) > (Rthreshold * self.sigma) ** 2
+            # TODO not tested
+    
+    ###############
     # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
     def __setstate__(self, state):

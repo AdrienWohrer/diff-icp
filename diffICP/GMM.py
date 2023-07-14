@@ -1,42 +1,47 @@
 '''
-Gaussian Mixture Model functionalities
+Gaussian Mixture Model functionalities. Adaptation of the GaussianMixture presented in KeOps tutorials, with the following main modifications:
+- only uniform isotropic covariances sigma^2*Id
+- added functions for EM fitting of the model to a set of data
 '''
 
 # Standard imports
 
-import os, time
-
-import copy
+import os, time, copy, math
+import importlib.util
 
 import numpy as np
+from matplotlib import pyplot as plt
+import matplotlib.cm as cm
 
 import torch
 from torch.nn import Module
 from torch.nn.functional import softmax, log_softmax
 
-from matplotlib import pyplot as plt
-import matplotlib.cm as cm
-
 # Look for keops and use it if possible
-import importlib.util
-keops_spec = importlib.util.find_spec("pykeops")
-use_keops = keops_spec is not None
+use_keops = importlib.util.find_spec("pykeops") is not None
 if use_keops:
-    from pykeops.torch import Vi, Vj, LazyTensor, Pm
+    from pykeops.torch import Vi, Vj
+else:
+    print("Warning: pykeops not installed. Consider installing it, if you are on linux")
 
-from diffICP.visu import my_scatter
 from diffICP.spec import defspec, getspec
 
-#################################################
-# Adaptation de la "GaussianMixture" présentée dans les exemples KeOps (voir z_commente_gaussian_mixture),
-# mais avec des covariances uniformes isotropes sigma^2*Id
-#
-# mu0 = emplacement initial des centroides
-# spec = dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
+#####################################################################################
+#####################################################################################
+###
+### _basic version : does not use KeOps, so in theory it can also be used in Windows
+###
+#####################################################################################
+#####################################################################################
 
-class GaussianMixtureUnif(Module):
+class GaussianMixtureUnif_basic(Module):
+
+    ### Initialization
+    # mu0 = initial emplacement of centroids
+    # spec = dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
+
     def __init__(self, mu0, spec=defspec):
-        super(GaussianMixtureUnif, self).__init__()			# https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
+        super(GaussianMixtureUnif_basic, self).__init__()			# https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
 
         self.params = {}
         self.spec = spec
@@ -52,22 +57,14 @@ class GaussianMixtureUnif(Module):
         }
 
     def __str__(self):
-        s = super(GaussianMixtureUnif, self).__str__()
+        s = super(GaussianMixtureUnif_basic, self).__str__()
         s+= ": Gaussian Mixture with Uniform covariances. Parameters:\n"
         s+= "    C [# components] : "+str(self.C)+"\n"
         s+= "    sigma [unif. std] : " +str(self.sigma)+"\n"
         s+= "    mu_c [centroids] :" +str(self.mu)+"\n"
         s+= "    w_c [component scores]:" +str(self.w)+"\n"
         return s
-        
-    # Custom deepcopy = copy GMM 
-    def __deepcopy__(self, memo):
-        G2 = GaussianMixtureUnif(self.mu, self.spec)
-        G2.sigma = self.sigma
-        G2.w = self.w.clone().detach()
-        G2.to_optimize = copy.deepcopy(self.to_optimize)
-        return G2
-    #
+
     # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
     def __setstate__(self, state):
@@ -80,32 +77,38 @@ class GaussianMixtureUnif(Module):
     ###
     #####################################################################
 
-    # Basic usage :
-    #       Y,Cfe = EM_step(X)
-    # Input :
-    #   - X(N,D) : data points
-    # The function performs ONE alternation of (E step,M step) for fitting the GMM model to the data points X.
-    # E step : compute (log)-responsibilities gamma_nc of each data points X_n to each GMM component c
-    # M step : update GMM parameters based on the new log-responsibilities
-    # Outputs :
-    #   - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c )
-    #   - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values
-    #
-    # The following helper function can also be useful :
-    #       lgamma = E_step(X)
-    # lgamma(N,C) are the log-responsibilities log(gamma_{nc}) for X in the current GMM model.
-    #
-    # The functions exist both in "_pytorch" versions (plain pytorch, manipulating large 2D arrays)
-    # and "keops" versions (faster, use symbolic 2D LazyTensors---but as a drawback the LazyTensors cannot be used directly)
-
-    ### Basic PyTorch versions
-    ##########################
-
-    # The responsibilities gamma_nc of each centroid mu_c for each data point X_n are coded by their log lgamma_nc. Thus (in Pytorch),
+    ### Basic implementation principle :
+    # the responsibilities gamma_nc of each centroid mu_c for each data point X_n are coded by their log lgamma_nc. Thus (in Pytorch),
     #       gamma_nc = lgamma_nc.exp()
     # Similarly, component priors are encoded by the SCORES w_c such that pi_c = exp(w_c) / sum_{c'} exp(w_{c'}). Thus (in Pytorch),
     #       pi = w.softmax()
     #       logpi = w - w.logsumexp()
+
+    ### Useful function : Compute log-responsibilities
+    #     lgamma = log_responsibilities(X)
+    # with
+    #   - X(N,D) : data points [pytorch tensor]
+    #   - lgamma(N,C) : log-responsibility of each data point X_n to each GMM component c [pytorch tensor]
+
+    def log_responsibilities(self,X):
+
+        X = X.detach()                                                              # to be sure
+        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)                        # shape (N,C)
+        lgamma_nc = log_softmax(self.w[None,:] - D2_nc/(2*self.sigma**2), dim=1)    # shape (N,C)
+        return lgamma_nc
+
+    ### EM_step function (pytorch version)
+    #       Y,Cfe = EM_step(X)
+    # The function performs ONE alternation of (E step,M step) for fitting the GMM model to the data points X.
+    # E step : compute (log)-responsibilities gamma_nc of each data points X_n to each GMM component c
+    # M step : update GMM parameters based on the new log-responsibilities
+    # Input :
+    #   - X(N,D) : data points
+    # Outputs :
+    #   - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c )
+    #   - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values
+
+    ### This is the plain _pytorch implementation :
     #
     # Reductions over either dimension (N or C) can be performed, e.g., as:
     #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = (softmax(lgamma_nc,dim=0) * stuff).sum(dim=0)
@@ -149,193 +152,64 @@ class GaussianMixtureUnif(Module):
 
     # NOTA: in this Pytorch version, it would be suboptimal to separate the E_step and M_step in two separate functions,
     # because both rely on the quadratic distance matrix D2_nc, that should better be computed only once.
-    # Instead, we provide an *additional* function E_step_pytorch, when one only needs to compute responsibilities.
-
-    ### E step : Compute log-responsibilities (returned as a pytorch 2D array)
-
-    def E_step_pytorch(self,X):
-
-        X = X.detach()                                                              # to be sure
-        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)                        # shape (N,C)
-        lgamma_nc = log_softmax(self.w[None,:] - D2_nc/(2*self.sigma**2), dim=1)    # shape (N,C)
-        return lgamma_nc
-
-    ### Equivalent KeOps versions
-    #############################
-
-    # Same principle as above, but now responsibilities "lgam_nc" are a SYMBOLIC 2D LazyTensor, so we cannot access its
-    # value directly. Responsibilities are only available through the application of a reduction in either dimension :
-    #
-    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = lgam_nc.sumsoftmaxweight(stuff,axis=0)
-    #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = lgam_nc.sumsoftmaxweight(stuff,axis=1)
-    # or alternatively
-    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) )  with stuff > 0       --> res = lgam_nc.logsumexp(weight=stuff,axis=0).exp()
-
-    ### E step : Compute log-responsibilities (returned as a symbolic keops LazyTensor).
-    # For convenience, also compute and return h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
-
-    def E_step(self, X):
-
-        X = X.detach()                              # to be sure
-        D2_nc = Vi(X).sqdist(Vj(self.mu))           # Quadratic distances (symbolic Keops matrix)
-        k_nc = Vj(self.w.view(self.C,1)) - D2_nc/(2*self.sigma**2)
-                                                    # log(gamma_nc) before normalization
-        Z_n = k_nc.logsumexp(axis=1)                # exp(Z_n) = sum_c exp(k_nc)
-        lgam_nc = k_nc - Vi(Z_n)                    # hence gamma_nc = exp(lgam_nc) ; and sum_c gamma_nc = 1
-        h_c = lgam_nc.logsumexp(axis=0)             # exp(h_c) = N_c = \sum_n gamma_{nc}
-        return lgam_nc, h_c
-
-    ### "M step" : Update GMM parameters, given data X and log-responsibilities lgam_nc.
-    # Computation can be made a little faster by providing numbers h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
-
-    def M_step(self, X, lgam_nc, h_c=None):
-
-        X = X.detach()                              # to be sure
-        N = X.shape[0]
-
-        if self.to_optimize["mu"]:
-            self.mu = lgam_nc.sumsoftmaxweight(Vi(X),axis=0).reshape(self.C,self.D)
-
-        if self.to_optimize["w"]:
-            if h_c is None:
-                h_c = lgam_nc.logsumexp(axis=0)          # exp(h_c) = N_c = \sum_n gamma_{nc}
-            self.w = (h_c - h_c.mean()).view(self.C)     # (w = h_c + arbitrary constant, chosen here so that w.mean()=0 )
-
-        if self.to_optimize["sigma"]:
-            D2_nc = Vi(X).sqdist(Vj(self.mu))           # Quadratic distances (symbolic Keops matrix)
-            #NDsigma2 = lgam_nc.sumsoftmaxweight(D2_nc, axis=1).sum()
-            NDsigma2 = lgam_nc.logsumexp(weight=D2_nc, axis=0).exp().sum()  # marginally faster (like, -10% when N=10000)
-            self.sigma = (NDsigma2 / (self.D * N)).sqrt().item()            # (.item() to return a simple float)
-
-    ### Compute EM-related values : Y (quadratic targets) and Cfe (free energy offset)
-    # Computation can be made a little faster by providing numbers h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
-
-    def EM_values(self, lgam_nc, h_c=None):
-
-        # "Cibles quadratiques" Y(N,D)
-        N = lgam_nc.shape[0]
-        Y = lgam_nc.sumsoftmaxweight(Vj(self.mu),axis=1).reshape(N,self.D)
-
-        # "Free energy offset" term (part of the free energy that does not depend directly on the points X)
-        # Cfe = sum_n sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) - log(pi_c) + log(gamma_{nc}) ]
-
-        logpi_c = (self.w - torch.logsumexp(self.w,0)).view(self.C,1)       # keops requires 2D
-        if h_c is None:                 # computation not requiring explicitly N_c (a little slower)
-            Cfe = N * self.D * np.log(self.sigma) + lgam_nc.sumsoftmaxweight(
-                Vj(self.mu).sqnorm2()/(2* self.sigma**2) - Vi(Y).sqnorm2()/(2* self.sigma**2) - Vj(logpi_c) + lgam_nc, axis=1).sum()
-        else:                           # a little faster
-            N_c = h_c.exp()
-            Cfe = ( (N_c * (self.mu**2).sum(-1,True)).sum() - (Y**2).sum() ) / (2*self.sigma**2) \
-                + N * self.D * np.log(self.sigma) - (N_c*logpi_c).sum() \
-                + (lgam_nc.sumsoftmaxweight(lgam_nc,axis=0) * N_c).sum()
-
-        return Y, Cfe.item()            # .item() to return a simple float
-
-    ### All three operation (E+M+compute Y and Cfe). Kept for simplicity
-
-    def EM_step(self, X):
-        lgam_nc, h_c = self.E_step(X)
-        self.M_step(X, lgam_nc, h_c)
-        Y, Cfe = self.EM_values(lgam_nc, h_c)
-        return Y, Cfe
 
 
-    ##################################################################################################################"
+    #####################################################################
+    ###
+    ### Other GMM functions
+    ###
+    #####################################################################
 
-    ### Addition Adrien (only valid in the case of uniform covariances)
+    ### Produce a sample from the GMM distribution
 
     def get_sample(self, N, rng=np.random.default_rng()):
         """Generates a sample of N points."""
         samp = self.sigma * torch.randn(N, self.D, **self.spec)     # random normal samples
         # center around (random) components
-        # (OLD) numpy version
-        # pi = softmax(self.w,0).numpy().flatten()                    # component weights
-        # c = rng.multinomial(1,pi,N)                                 # random component indices
-        # c = np.where(c==1)[1]
-        # (NEW) Torch version
         c = torch.distributions.categorical.Categorical(logits=self.w).sample((N,))
         for n in range(N):
             samp[n,:] += self.mu[c[n],:]
         return samp
 
-    ##################################################################################################################"
+    ### PLOTTING FUNCTION (adapted from a KeOps tutorial)
 
-    ##################################################
-    ###
-    ### Functions below are taken from a KeOps tutorial. Kept only to the use the plotting function (self.plot() below)
-    ###
-    ##################################################
-
-    def update_covariances(self):   # actually, gamma = *inverse* covariance
-        """Computes the full covariance matrices from the model's parameters."""
-        self.params["gamma"] = (torch.eye(self.D, **self.spec) * self.sigma**(-2))[None,:,:].repeat([self.C,1,1]).view(self.C,self.D**2)
-
-#    def covariances_determinants(self): # en fait, det(gamma) = det(Sigma)^(-1)
-#        return self.sigma**(-2*self.D) * torch.ones(self.C)      # TODO CHECK (not tested)
-
-    def weights(self):
-        """Scalar factor in front of the exponential, in the density formula."""
-        return softmax(self.w, 0) / self.sigma**self.D
-
-    def weights_log(self):
-        """Logarithm of the scalar factor, in front of the exponential."""
-        return log_softmax(self.w, 0) + self.D * self.sigma.log()
-
-    def likelihoods(self, sample):
-        """Samples the density on a given point cloud."""
-        sample = sample.to(**self.spec)
-        self.update_covariances()
-        return (
-            -Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))
-        ).exp() @ self.weights()
-
-    def log_likelihoods(self, sample):
-        """Log-density, sampled on a given point cloud."""
-        sample = sample.to(**self.spec)
-        self.update_covariances()
-        K_ij = -Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))
-        return K_ij.logsumexp(dim=1, weight=Vj(self.weights().reshape(self.C,1)))
-
-    def neglog_likelihood(self, sample):
-        """Returns -log(likelihood(sample)) up to an additive factor."""
-        ll = self.log_likelihoods(sample)
-        log_likelihood = torch.mean(ll)
-        return -log_likelihood #+ self.sparsity * softmax(self.w, 0).sqrt().mean()
-
-    # - *samples = list of points sets of size (?,D), only input here to compute boundaries.
-    #              The actual plotting of these point sets must be done elsewhere
-    # OR
-    # - bounds = [xmin,xmax,ymin,max] to provide hard-coded limits (in which case samples are useless)
+    #
 
     def plot(self, *samples, bounds=None, heatmap=True, color=None):
-        """Displays the model."""
-        
+        """Displays the model in 2D (adapted from a KeOps tutorial).
+        Boundaries for plotting can be specified in either of two ways :
+            (a) bounds = [xmin,xmax,ymin,max] provides hard-coded limits (primary used information if present)
+         or (b) *samples = list of points sets of size (?,2). In which case, the plotting boundaries are automatically
+                computed to match to extent of these point sets. (Note that the *actual* plotting of these point sets,
+                if required, must be performed externally.)
+        """
+
         ### bounds for plotting
 
         if bounds != None:
             # Use provided bounds directly
             gmin, gmax = bounds[0::2], bounds[1::2]
-            
+
         else:
             # Compute from centroids and/or associated samples
-            if len(samples)==0:
+            if len(samples) == 0:
                 # get bounds directly from centroids
                 samples = [self.mu]
-            
-            mins = torch.cat( tuple( xy.min(0).values.reshape(1,2) for xy in samples if len(xy)>0 ) , 0).min(0).values
-            maxs = torch.cat( tuple( xy.max(0).values.reshape(1,2) for xy in samples if len(xy)>0 ) , 0).max(0).values
-            
+
+            mins = torch.cat(tuple(xy.min(0).values.reshape(1, 2) for xy in samples if len(xy) > 0), 0).min(0).values
+            maxs = torch.cat(tuple(xy.max(0).values.reshape(1, 2) for xy in samples if len(xy) > 0), 0).max(0).values
+
             relmargin = 0.2
-            gmin = ((1+relmargin)*mins - relmargin*maxs).tolist()
-            gmax = ((1+relmargin)*maxs - relmargin*mins).tolist()
-        
+            gmin = ((1 + relmargin) * mins - relmargin * maxs).tolist()
+            gmax = ((1 + relmargin) * maxs - relmargin * mins).tolist()
+
         # Create a uniform grid on the unit square:
         res = 200
-        xticks = np.linspace(gmin[0], gmax[0], res + 1)[:-1] #+ 0.5 / res
-        yticks = np.linspace(gmin[1], gmax[1], res + 1)[:-1] #+ 0.5 / res
+        xticks = np.linspace(gmin[0], gmax[0], res + 1)[:-1]  # + 0.5 / res
+        yticks = np.linspace(gmin[1], gmax[1], res + 1)[:-1]  # + 0.5 / res
         X, Y = np.meshgrid(xticks, yticks)
         grid = torch.from_numpy(np.vstack((X.ravel(), Y.ravel())).T).contiguous()
-                # Adrien : https://stackoverflow.com/questions/48915810/what-does-contiguous-do-in-pytorch
+        # Adrien : https://stackoverflow.com/questions/48915810/what-does-contiguous-do-in-pytorch
 
         # Heatmap:
         if heatmap:
@@ -374,6 +248,162 @@ class GaussianMixtureUnif(Module):
             extent=(gmin[0], gmax[0], gmin[1], gmax[1]),
         )
 
+    ###
+    ### Functions below are directly adapted from the original KeOps tutorial.
+    ### They are included because they are used in the plotting function above
+
+    def update_covariances(self):   # actually, gamma = *inverse* covariance
+        """Computes the full covariance matrices from the model's parameters."""
+        self.params["gamma"] = (torch.eye(self.D, **self.spec) * self.sigma**(-2))[None,:,:].repeat([self.C,1,1]).view(self.C,self.D**2)
+
+    def weights(self):
+        """Scalar factor in front of the exponential, in the density formula."""
+        return softmax(self.w, 0) / self.sigma**self.D
+
+    def weights_log(self):
+        """Logarithm of the scalar factor, in front of the exponential."""
+        return log_softmax(self.w, 0) - self.D * math.log(self.sigma)
+
+    def likelihoods(self, sample):
+        """Samples the density on a given point cloud."""
+        sample = sample.to(**self.spec)
+        self.update_covariances()
+        # return (-Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))/2).exp() @ self.weights()  # (keops version from the tutorial)
+        return (-((sample[:,None,:]-self.mu[None,:,:])**2).sum(-1)/(2*self.sigma**2)).exp() @ self.weights()   # plain pytorch version
+
+    def log_likelihoods(self, sample):
+        """Log-density, sampled on a given point cloud."""
+        sample = sample.to(**self.spec)
+        self.update_covariances()
+        # K_ij = -Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))/2
+        # return K_ij.logsumexp(dim=1, weight=Vj(self.weights().reshape(self.C,1)))  # (keops version from the tutorial)
+        return (-((sample[:,None,:]-self.mu[None,:,:])**2).sum(-1)/(2*self.sigma**2) + self.weights_log()[None,:]).logsumexp(dim=1) # plain pytorch version
+
+
+
+#####################################################################################
+#####################################################################################
+###
+### _keops version : added KeOps functionalities if available (hopefully faster)
+###
+#####################################################################################
+#####################################################################################
+
+class GaussianMixtureUnif_keops(GaussianMixtureUnif_basic):
+
+    ### KeOps implementation of the EM functions
+    ############################################
+
+    # Same principle as above, but now responsibilities "lgam_nc" are a SYMBOLIC 2D LazyTensor, so we cannot access its
+    # value directly. Responsibilities are only available through the application of a reduction in either dimension :
+    #
+    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = lgam_nc.sumsoftmaxweight(stuff,axis=0)
+    #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = lgam_nc.sumsoftmaxweight(stuff,axis=1)
+    # or alternatively
+    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) )  with stuff > 0       --> res = lgam_nc.logsumexp(weight=stuff,axis=0).exp()
+
+    ### E step : Compute log-responsibilities (returned as a symbolic keops LazyTensor).
+    # For convenience, also compute and return h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
+
+    def E_step_keops(self, X):
+
+        X = X.detach()  # to be sure
+        D2_nc = Vi(X).sqdist(Vj(self.mu))  # Quadratic distances (symbolic Keops matrix)
+        k_nc = Vj(self.w.view(self.C, 1)) - D2_nc / (2 * self.sigma ** 2)
+        # log(gamma_nc) before normalization
+        Z_n = k_nc.logsumexp(axis=1)  # exp(Z_n) = sum_c exp(k_nc)
+        lgam_nc = k_nc - Vi(Z_n)  # hence gamma_nc = exp(lgam_nc) ; and sum_c gamma_nc = 1
+        h_c = lgam_nc.logsumexp(axis=0)  # exp(h_c) = N_c = \sum_n gamma_{nc}
+        return lgam_nc, h_c
+
+    ### "M step" : Update GMM parameters, given data X and log-responsibilities lgam_nc.
+    # Computation can be made a little faster by providing numbers h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
+
+    def M_step_keops(self, X, lgam_nc, h_c=None):
+
+        X = X.detach()  # to be sure
+        N = X.shape[0]
+
+        if self.to_optimize["mu"]:
+            self.mu = lgam_nc.sumsoftmaxweight(Vi(X), axis=0).reshape(self.C, self.D)
+
+        if self.to_optimize["w"]:
+            if h_c is None:
+                h_c = lgam_nc.logsumexp(axis=0)  # exp(h_c) = N_c = \sum_n gamma_{nc}
+            self.w = (h_c - h_c.mean()).view(self.C)  # (w = h_c + arbitrary constant, chosen here so that w.mean()=0 )
+
+        if self.to_optimize["sigma"]:
+            D2_nc = Vi(X).sqdist(Vj(self.mu))  # Quadratic distances (symbolic Keops matrix)
+            # NDsigma2 = lgam_nc.sumsoftmaxweight(D2_nc, axis=1).sum()
+            NDsigma2 = lgam_nc.logsumexp(weight=D2_nc,
+                                         axis=0).exp().sum()  # marginally faster (like, -10% when N=10000)
+            self.sigma = (NDsigma2 / (self.D * N)).sqrt().item()  # (.item() to return a simple float)
+
+    ### Compute EM-related values : Y (quadratic targets) and Cfe (free energy offset)
+    # Computation can be made a little faster by providing numbers h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
+
+    def EM_values_keops(self, lgam_nc, h_c=None):
+
+        # "Cibles quadratiques" Y(N,D)
+        N = lgam_nc.shape[0]
+        Y = lgam_nc.sumsoftmaxweight(Vj(self.mu), axis=1).reshape(N, self.D)
+
+        # "Free energy offset" term (part of the free energy that does not depend directly on the points X)
+        # Cfe = sum_n sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) - log(pi_c) + log(gamma_{nc}) ]
+
+        logpi_c = (self.w - torch.logsumexp(self.w, 0)).view(self.C, 1)  # keops requires 2D
+        if h_c is None:  # computation not requiring explicitly N_c (a little slower)
+            Cfe = N * self.D * np.log(self.sigma) + lgam_nc.sumsoftmaxweight(
+                Vj(self.mu).sqnorm2() / (2 * self.sigma ** 2) - Vi(Y).sqnorm2() / (2 * self.sigma ** 2) - Vj(
+                    logpi_c) + lgam_nc, axis=1).sum()
+        else:  # a little faster
+            N_c = h_c.exp()
+            Cfe = ((N_c * (self.mu ** 2).sum(-1, True)).sum() - (Y ** 2).sum()) / (2 * self.sigma ** 2) \
+                  + N * self.D * np.log(self.sigma) - (N_c * logpi_c).sum() \
+                  + (lgam_nc.sumsoftmaxweight(lgam_nc, axis=0) * N_c).sum()
+
+        return Y, Cfe.item()  # .item() to return a simple float
+
+    ### All three operation (E+M+compute Y and Cfe). Kept for simplicity
+
+    def EM_step_keops(self, X):
+        lgam_nc, h_c = self.E_step_keops(X)
+        self.M_step_keops(X, lgam_nc, h_c)
+        Y, Cfe = self.EM_values_keops(lgam_nc, h_c)
+        return Y, Cfe
+
+
+#####################################################################################
+#####################################################################################
+###
+### Actual version used : GaussianMixtureUnif. _pytorch or _keops version depending on availability
+###
+#####################################################################################
+#####################################################################################
+
+if use_keops:
+    class GaussianMixtureUnif(GaussianMixtureUnif_keops):
+        EM_step = GaussianMixtureUnif_keops.EM_step_keops
+
+        # Custom deepcopy = copy GMM
+        def __deepcopy__(self, memo):
+            G2 = GaussianMixtureUnif(self.mu, self.spec)
+            G2.sigma = self.sigma
+            G2.w = self.w.clone().detach()
+            G2.to_optimize = copy.deepcopy(self.to_optimize)
+            return G2
+
+else:
+    class GaussianMixtureUnif(GaussianMixtureUnif_basic):
+        EM_step = GaussianMixtureUnif_basic.EM_step_pytorch
+
+        # Custom deepcopy = copy GMM (ugly to copy code twice, but heck...)
+        def __deepcopy__(self, memo):
+            G2 = GaussianMixtureUnif(self.mu, self.spec)
+            G2.sigma = self.sigma
+            G2.w = self.w.clone().detach()
+            G2.to_optimize = copy.deepcopy(self.to_optimize)
+            return G2
 
 
 ############################################################################################
@@ -420,12 +450,15 @@ if False:
         my_scatter(x)
 
         # Compare Pytorch and Keops E steps : OK
-        # lgam_torch = GMM.E_step_pytorch(x)                  # (N,C)
+        # lgam_torch = GMM.log_responsibilities(x)            # (N,C)
         # print(softmax(lgam_torch,dim=0).t() @ x)            # (C,2)
-        # lgam_keops,_ = GMM.E_step(x)
+        # lgam_keops,_ = GMM.E_step_keops(x)
         # print(lgam_keops.sumsoftmaxweight(Vi(x), axis=0).reshape(C,2))
 
-        # GMM.EM_step(x)
+        print(GMM.likelihoods(x))
+        print(GMM.log_likelihoods(x))
+
+        GMM.EM_step(x)
 #        GMM.EM_step_pytorch(x)
 #        print(GMM)
 #        input()
