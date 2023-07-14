@@ -156,6 +156,8 @@ class GenKernel:
 
 class GaussKernel(GenKernel):
 
+
+    #######################
     ### Actual kernel (and corresponding Laplacian kernel) formulas : pytorch versions
 
     def K_pytorch(self, x, y):
@@ -234,7 +236,7 @@ class GaussKernel(GenKernel):
         # dimension D and scale parameter sigma) are treated as CPU objects unless explicitly precised otherwise,
         # leading to a possible 'CPU/GPU clash'. See question posted here: https://github.com/getkeops/keops/issues/306
         # Thus, we make torch copies of these parameters with imposed spec (and this is the only role of attribute self.spec):
-        if use_keops:
+        if use_keops and computversion == "keops":
             self.sigma_k = Pm(torch.tensor(sigma, **spec))
             self.D_k = Pm(torch.tensor(D, **spec))
         else:
