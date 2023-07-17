@@ -32,7 +32,7 @@ from diffICP.spec import defspec, getspec
 
 ###################################################################
 # Saving simulation results (with dill, a generalization of pickle)
-savestuff = True
+savestuff = False
 import dill
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
@@ -41,7 +41,7 @@ savefile = "saving/test_nokeops_save.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
-plotstuff = False
+plotstuff = True
 
 # Number of global loop iterations
 nIter = 1
