@@ -121,7 +121,7 @@ class LDDMMModel:
         else:
             return self.Kernel.KRed(x, q, p) - self.eta * self.Kernel.GradKRed(x, q)
 
-    ### Evaluate the sum of -div(v) at given points x
+    ### Evaluate the sum of -div(v) at given points x.
 
     def mdivsum(self, x, q, p, rev=False):
         spec = getspec(x,q,p)
@@ -393,3 +393,4 @@ if False:
     ##    print(LDDMM.random_p(xt, version='ridge'))       # fail when N big (matrix singular up to numeric precision)
 
     exit()
+

@@ -24,7 +24,7 @@ from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
-from diffICP.visu import my_scatter, plot_shoot
+from diffICP.visu import my_scatter
 from diffICP.spec import defspec, getspec
 
 ###################################################################
@@ -34,14 +34,14 @@ import dill
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
-savefile = "saving/test_multi.pkl"
+savefile = "saving/registration_multi_1.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
 plotstuff = True
 
 # Number of global loop iterations
-nIter = 50
+nIter = 30
 
 ###################################################################
 ### Part 1 : Synthetic data generation
@@ -188,8 +188,8 @@ for it in range(nIter):
         PSR.GMMi[0].plot(*x0, *x1)
         my_scatter(*x1[0:min(5,PSR.K)], alpha=.6)
         for k in range(min(5,PSR.K)):
-            ...
-            PSR.plot_trajectories(k)
+            # ...
+            # PSR.plot_trajectories(k)
             PSR.plot_trajectories(k, support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
         plt.show()
         plt.pause(.1)
@@ -206,6 +206,7 @@ if savestuff:
         dill.dump(tosave, f)
         
 # Wait for click
+print('Done.')
 if plotstuff:
     input()
 

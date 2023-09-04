@@ -23,7 +23,7 @@ from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
-from diffICP.visu import my_scatter, plot_shoot
+from diffICP.visu import my_scatter
 from diffICP.spec import defspec, getspec
 
 
@@ -39,7 +39,7 @@ savefile = "saving/test_full.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
-plotstuff = False
+plotstuff = True
 
 # Number of global loop iterations
 nIter = 30
@@ -170,8 +170,8 @@ LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
                           version = "logdet")   # "logdet", "classic" or "hybrid"
 
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-# PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
-PSR = diffPSR(x0, GMMi, LMi, Rdecim=None)
+PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
+# PSR = diffPSR(x0, GMMi, LMi, Rdecim=None)
 
 ### Point Set Registration model : affine version
 

@@ -1,5 +1,5 @@
 '''
-Function implementing the "general" version of diffICP algorithm
+Function implementing the "general" version of diffICP algorithm (and also the classic, affine version)
 '''
 
 import os, time, math, copy
@@ -17,7 +17,7 @@ import torch
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
-from diffICP.visu import my_scatter, plot_shoot
+from diffICP.registrations import LDDMMRegistration, AffineRegistration
 from diffICP.decimate import decimate
 from diffICP.spec import defspec, getspec
 
@@ -100,7 +100,7 @@ class multiPSR:
 
         # self.x0[k,s] : unregistered point sets
         # self.x1[k,s] : registered (warped) point sets
-        # self.y[k,s] : quadratic (GMM E-step) targets for each point
+        # self.y[k,s] : "quadratic targets" for each point (as produced by the GMM E step)
 
         self.x0 = np.empty((self.K,self.S), dtype=object)
         self.x1 = np.empty((self.K,self.S), dtype=object)
@@ -114,11 +114,10 @@ class multiPSR:
         # self.N[k,s] = number of points in point set (k,s)
         self.N = np.array([[self.x0[k,s].shape[0] for s in range(self.S)] for k in range(self.K)])
 
-
         ### GMM model for inference (one per structure s)
 
         if GMMi.spec != compspec:
-            raise ValueError("Spec (dtype+device) error : GMM 'spec' and diffPSR 'compspec' attributes should be the same")
+            raise ValueError("Spec (dtype+device) error : GMM 'spec' and multiPSR 'compspec' attributes should be the same")
 
         if isinstance(GMMi, GaussianMixtureUnif):
             self.GMMi = [copy.deepcopy(GMMi) for s in range(self.S)]
@@ -136,8 +135,6 @@ class multiPSR:
             if self.GMMi[s].to_optimize["sigma"]:
                 self.GMMi[s].sigma = 0.25 * allx0s.std()  # ad hoc
 
-
-
         # The FULL EM free energy writes
         #   F = \sum_{k,s} quadloss[k,s] + \sum_k regloss[k] + \sum_s Cfe[s],
         # with Cfe the "free energy offset term" associated to each GMM model's current state (see GMM.py)
@@ -149,7 +146,6 @@ class multiPSR:
 
         # Store last shoot for each frame (for plotting, etc.)
         self.shoot = [None] * self.K
-
 
     # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
@@ -213,30 +209,21 @@ class multiPSR:
         raise NotImplementedError("function Reg_opt must be written in derived classes.")
 
 
-
     ################################################################
-    ### For convenience : return a "shoot" variable for frame k.
-    # - if params is None, return the PSR model's current shoot variable for frame k : self.shoot[k]
-    # - if params is not None, compute the shoot variable that *would* be associated to registration parameters "param"
-    # (for LDDMM : initial momentum a0k ; for Affine : transformation parameters (M,t) as a tuple). Nota: this computation
-    # remains "external", i.e., it does not affect the current state of the PSR (self.shoot, self.x1, self.a0, etc).
+    ### For convenience : return an "interface" class providing easy registration of external point sets. See registrations.py
 
-    def get_shoot(self, k=0, params=None):
-        if params is None:
-            return self.shoot[k]
-        elif isinstance(self, diffPSR):
-            a0k = params
-            return self.LMi.Shoot(self.q0[k], a0k, self.remx0[k])
+    def Registration(self, k=0):
+        '''return a "Registration object" for frame number k (k=0 for single frame)'''
+        if isinstance(self, diffPSR):
+            return LDDMMRegistration(self.LMi, self.q0[k], self.a0[k])
         elif isinstance(self, affinePSR):
-            M,t = params
-            Xk = torch.cat(tuple(self.x0[k, :]), dim=0)
-            return self.AffMi.Shoot(M, t, Xk)
+            return AffineRegistration(self.AffMi, self.M[k], self.t[k])
 
 
     ################################################################
     ### For convenience : visualization of trajectories for frame k
-    # support=True only used in derived class diffPSR, to visualize trajectories of support points only
-    # shoot = shoot variable containing the trajectories. By default, self.shoot[k]
+    # support = only used in class diffPSR: visualize trajectories of support points only (if True)
+    # shoot = custom 'shoot' variable
     # kwargs = plotting arguments
 
     def plot_trajectories(self, k=0, support=False, shoot=None, **kwargs):
@@ -247,39 +234,24 @@ class multiPSR:
         if "color" not in kwargs.keys():
             kwargs["color"] = "C" + str(k)
 
-        # index of point set to represent inside tuple shoot (only used in class diffPSR)
-        if isinstance(self, diffPSR):
-            if support:
-                i = 0
-            else:
-                i = 3
-        else:
-            if support:
-                return      # do nothing in this case
-            else:
-                i = 0
-
         if shoot is None:
             shoot = self.shoot[k]
 
-        x = [tup[i] for tup in shoot]
+        if shoot is None:  # must recompute
+            if isinstance(self, diffPSR):
+                shoot = self.LMi.Shoot(self.q0[k], self.a0[k], self.remx0[k])
+            else:
+                X = torch.cat(tuple(self.x0[k, :]), dim=0).to(**self.compspec)
+                shoot = self.AffMi.Shoot(self.M[k], self.t[k], X)
+
+        if isinstance(self,diffPSR) and not support:
+            x = [torch.cat((tup[0],tup[3])) for tup in shoot]   # support and non support
+        else:
+            x = [tup[0] for tup in shoot]
+
         for n in range(x[0].shape[0]):
             xnt = np.array([xt[n, :].cpu().tolist() for xt in x])
             plt.plot(xnt[:, 0], xnt[:, 1], **kwargs)
-
-    ################################################################
-    ### For convenience : compute the registration of an external point set X.
-    # Y = register(X,k)
-    # with X(N,D) some input points, and Y(N,D) their registered version, using parameters from frame k.
-    # Remains "external", i.e., it does not affect the current state of the PSR (self.shoot, self.x1, self.a0, etc).
-
-    def register(self, X, k=0):
-        if isinstance(self, diffPSR):
-            shoot = self.LMi.Shoot(self.q0[k], self.a0[k], X)
-            Y = shoot[-1][3]
-        elif isinstance(self, affinePSR):
-            Y = X @ self.M[k].t() + self.t[k][None,:]
-        return Y
 
 
 #######################################################################
@@ -444,8 +416,8 @@ class affinePSR(multiPSR):
         super().__init__(x, GMMi, dataspec=dataspec, compspec=compspec)
         self.AffMi = AffMi
         # Affine transform applied to each frame k  (T(x) = M*x+t)
-        self.M = [None] * self.K
-        self.t = [None] * self.K
+        self.M = [torch.eye(self.D, **dataspec)] * self.K
+        self.t = [torch.zeros(self.D, **dataspec)] * self.K
 
     ################################################################
     ### Partial optimization, registration part (for each frame k in turn)

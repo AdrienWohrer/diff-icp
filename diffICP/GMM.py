@@ -25,6 +25,8 @@ else:
     print("Warning: pykeops not installed. Consider installing it, if you are on linux")
 
 from diffICP.spec import defspec, getspec
+from diffICP.visu import get_bounds
+from diffICP.registrations import Registration
 
 #####################################################################################
 #####################################################################################
@@ -175,7 +177,7 @@ class GaussianMixtureUnif_basic(Module):
 
     #
 
-    def plot(self, *samples, bounds=None, heatmap=True, color=None):
+    def plot(self, *samples, bounds=None, heatmap=True, color=None, cmap=cm.RdBu, heatmap_amplification=-1, registration=None):
         """Displays the model in 2D (adapted from a KeOps tutorial).
         Boundaries for plotting can be specified in either of two ways :
             (a) bounds = [xmin,xmax,ymin,max] provides hard-coded limits (primary used information if present)
@@ -188,51 +190,68 @@ class GaussianMixtureUnif_basic(Module):
 
         if bounds != None:
             # Use provided bounds directly
-            gmin, gmax = bounds[0::2], bounds[1::2]
-
+            xmin, xmax, ymin, ymax = tuple(bounds)
         else:
             # Compute from centroids and/or associated samples
             if len(samples) == 0:
                 # get bounds directly from centroids
-                samples = [self.mu]
+                samples = (self.mu,)
+            xmin, xmax, ymin, ymax = get_bounds(*samples)    # in diffICP.visu
 
-            mins = torch.cat(tuple(xy.min(0).values.reshape(1, 2) for xy in samples if len(xy) > 0), 0).min(0).values
-            maxs = torch.cat(tuple(xy.max(0).values.reshape(1, 2) for xy in samples if len(xy) > 0), 0).max(0).values
+        ### Create a uniform grid on the unit square:
 
-            relmargin = 0.2
-            gmin = ((1 + relmargin) * mins - relmargin * maxs).tolist()
-            gmax = ((1 + relmargin) * maxs - relmargin * mins).tolist()
-
-        # Create a uniform grid on the unit square:
         res = 200
-        xticks = np.linspace(gmin[0], gmax[0], res + 1)[:-1]  # + 0.5 / res
-        yticks = np.linspace(gmin[1], gmax[1], res + 1)[:-1]  # + 0.5 / res
+        xticks = np.linspace(xmin, xmax, res + 1)[:-1]  # + 0.5 / res
+        yticks = np.linspace(ymin, ymax, res + 1)[:-1]  # + 0.5 / res
         X, Y = np.meshgrid(xticks, yticks)
-        grid = torch.from_numpy(np.vstack((X.ravel(), Y.ravel())).T).contiguous()
+        grid = torch.from_numpy(np.vstack((X.ravel(), Y.ravel())).T).to(**defspec).contiguous()
         # Adrien : https://stackoverflow.com/questions/48915810/what-does-contiguous-do-in-pytorch
 
-        # Heatmap:
+        ### Show the pushforward of GMM distribution by a given registration (experimental!)
+
+        if registration is not None:
+            reggrid = registration.apply(grid)
+            # estimate det of registration at all grid points
+            vol_g = [None]*2
+            for i,g in enumerate([reggrid,grid]):
+                g2d = g.view(res,res,2)
+                g_x = g2d[2:,:,:] - g2d[:-2,:,:]
+                g_y = g2d[:,2:,:] - g2d[:,:-2,:]
+                # duplicate missing lines / columns on the border
+                g_x = torch.concatenate((g_x[0,:,:][None,:,:], g_x, g_x[-1,:,:][None,:,:]), dim = 0)
+                g_y = torch.concatenate((g_y[:,0,:][:,None,:], g_y, g_y[:,-1,:][:,None,:]), dim = 1)
+                # estimate volume of each cell in the grid
+                vol_g[i] = (g_x[:,:,0]*g_y[:,:,1] - g_x[:,:,1]*g_y[:,:,0]).reshape((-1,))
+            det_grid = vol_g[0] / vol_g[1]      # (=Jacobian of registration in each grid point)
+
+        ### Heatmap:
+
         if heatmap:
-            heatmap = self.likelihoods(grid)
+            if registration is None:
+                heatmap = self.likelihoods(grid)
+            else:
+                heatmap = self.likelihoods(reggrid) * det_grid      # * or / ?
             heatmap = (
                 heatmap.view(res, res).data.cpu().numpy()
             )  # reshape as a "background" image
 
             scale = np.amax(np.abs(heatmap[:]))
             plt.imshow(
-                -heatmap,
+                heatmap_amplification * heatmap,
                 interpolation="bilinear",
                 origin="lower",
                 vmin=-scale,
                 vmax=scale,
-                cmap=cm.RdBu,
-                extent=(gmin[0], gmax[0], gmin[1], gmax[1]),
+                cmap=cmap,
+                extent=(xmin, xmax, ymin, ymax),
             )
 
-        # Log-contours:
-        log_heatmap = self.log_likelihoods(grid)
+        ### Log-contours:
+        if registration is None:
+            log_heatmap = self.log_likelihoods(grid)
+        else:
+            log_heatmap = self.log_likelihoods(reggrid) + det_grid.log()    # + or - ?
         log_heatmap = log_heatmap.view(res, res).data.cpu().numpy()
-
         scale = np.amax(np.abs(log_heatmap[:]))
         levels = np.linspace(-scale, scale, 41)
 
@@ -245,10 +264,9 @@ class GaussianMixtureUnif_basic(Module):
             linewidths=1.0,
             colors=color,
             levels=levels,
-            extent=(gmin[0], gmax[0], gmin[1], gmax[1]),
+            extent=(xmin, xmax, ymin, ymax),
         )
 
-    ###
     ### Functions below are directly adapted from the original KeOps tutorial.
     ### They are included because they are used in the plotting function above
 
@@ -412,7 +430,8 @@ else:
 ###
 ############################################################################################
 
-    
+### Test EM functions
+
 if False:
     plt.ion()
     
@@ -467,3 +486,36 @@ if False:
     input()
     
 
+### Test plotting function with registration (experimental!)
+
+if False:
+    plt.ion()
+    bounds = (-0.5,1.5,-0.5,1.5)
+
+    ### Load existing diffeomorphic registration (simpler)
+    from diffICP.spec import CPU_Unpickler
+    loadfile = "saving/test_basic.pkl"
+    with open(loadfile, 'rb') as f:
+        yo = CPU_Unpickler(f).load()        # modified dill Unpickler (see diffPSR.spec.CPU_Unpickler)
+    reg = yo["PSR"].Registration()
+    amplif = 1                              # modify strength of a0 (for testing)
+    reg.a0 *= amplif
+
+    ### Also apply registration to a grid, for visualization
+    from diffICP.grid import Gridlines
+    bounds = (-0.5,1.5,-0.5,1.5)
+    gridlines = Gridlines(np.linspace(*bounds[:2],30), np.linspace(*bounds[2:],30))
+    reglines = gridlines.register(reg, backward=True)
+
+    ### Apply registration to GMM model
+    GMM = GaussianMixtureUnif(mu0=torch.tensor([[0.8,0.4],[0.2,0.5],[0.5,0.6]],**defspec))
+    GMM.sigma = 0.1
+    GMM.w = torch.tensor([0,0.5,1],**defspec)
+    plt.figure()
+    GMM.plot(bounds=bounds)
+    gridlines.plot(color='gray',linewidth=0.5)
+    plt.figure()
+    GMM.plot(registration=reg, bounds=bounds)
+    reglines.plot(color='gray',linewidth=0.5)
+    plt.pause(.1)
+    input()

@@ -6,6 +6,7 @@ import os
 import time
 import numpy as np
 from matplotlib import pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
 plt.ion()
 
 import torch
@@ -16,7 +17,7 @@ import pykeops
 #pykeops.clean_pykeops()
 
 # Manual random generator seeds (to always reproduce the same point sets if required)
-torch.random.manual_seed(1234)
+#torch.random.manual_seed(1234)
 
 
 ###################################################################
@@ -26,7 +27,7 @@ from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
-from diffICP.visu import my_scatter, plot_shoot
+from diffICP.visu import my_scatter
 from diffICP.spec import defspec, getspec
 
 
@@ -37,14 +38,19 @@ import dill
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
-savefile = "saving/test_nokeops_save.pkl"
+savefile = "saving/test_basic.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
 plotstuff = True
 
 # Number of global loop iterations
-nIter = 1
+nIter = 20
+
+# Also optimize sigma ?
+sigma_opt = True
+sigma_start = 0.1   # starting sigma for GMMi (if sigma_opt=True) or FIXED value for GMMi (if sigma_opt=False)
+                    # set at None to use the exact value from generating model GMMg
 
 ###################################################################
 ### Part 1 : Synthetic data generation
@@ -73,7 +79,7 @@ if plotstuff:
 
 LMg = LDDMMModel(sigma = 0.2,   # sigma of the Gaussian kernel
                  D=2,           # dimension of space
-                 lambd= 1e2,    # lambda of the LDDMM regularization
+                 lambd= 1e2,    # 1e2 lambda of the LDDMM regularization
                  version = "classic",
                  nt = 10)       # time discretization of interval [0,1] for ODE resolution
 
@@ -116,17 +122,23 @@ LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
                           lambd= 5e2,           # lambda of the LDDMM regularization
                           version = "logdet")   # "logdet", "classic" or "hybrid"
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-# PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
+PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.2, Rcoverwarning=1)
-PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
+# PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
 
 ### Point Set Registration model : affine version
 
 # PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'similarity'))
-# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'affine', withlogdet=False))
+# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'euclidian', withlogdet=False))
 
-# for storing results
-a0_evol = []
+# To change sigma also and optimize it (as in classic 2-point set probablistic ICP)
+if sigma_start is not None:
+    PSR.GMMi[0].sigma = sigma_start     # (else, keep true value from GMMg)
+if sigma_opt:
+    PSR.GMMi[0].to_optimize["sigma"] = True
+
+# for storing parameter evolution in time
+param_evol = []
 
 ### Optimization loop
 
@@ -138,9 +150,14 @@ for it in range(nIter):
     print("ITERATION NUMBER ",it)
 
     ### Store stuff (for saving results to file)
-    # a0_evol[version][it] = current a0 tensor(N,2)
+    # param_evol[version][it] = current a0 tensor(N,2)
+
     if isinstance(PSR, diffPSR):
-        a0_evol.append( PSR.a0[0].clone().detach().cpu() )
+        par = {'a0':PSR.a0[0].cpu()}
+    elif isinstance(PSR, affinePSR):
+        par = {'M':PSR.M[0].cpu(), 't':PSR.t[0].cpu()}
+    par['sigma'] = PSR.GMMi[0].sigma
+    param_evol.append(par)
 
     ### E step for GMM model
     PSR.GMM_opt()
@@ -148,16 +165,25 @@ for it in range(nIter):
     ###LDDMM step optimization for diffeomorphisms
     PSR.Reg_opt(tol=1e-5)
 
+    if sigma_opt:
+        print(f"Sigma: {PSR.GMMi[0].sigma}")
+
     ### Plot resulting point sets (and some trajectories)
 
     if plotstuff:
         plt.clf()
         x1 = PSR.x1[0,0]
-        GMMg.plot( x0, x1 )
+        PSR.GMMi[0].plot( x0, x1 )
+        my_scatter(PSR.GMMi[0].mu, alpha=.6, color="b")
         my_scatter(x1, alpha=.6, color="r")
         PSR.plot_trajectories(color='red')
-        PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
+        # PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
         #plt.show()
+        plt.xticks(np.arange(-0.5, 1.5 + 0.1, 0.5))
+        plt.yticks(np.arange(-0.5, 1.5 + 0.1, 0.5))
+        plt.gca().xaxis.set_major_formatter(FormatStrFormatter('%0.1f'))  # Ensure correctly formated ticks
+        plt.gca().set_aspect('equal')
+        plt.gca().autoscale(tight=True)
         plt.pause(.1)
 
         #print(PSR.x1[0,0][:5])  # debug
@@ -165,7 +191,7 @@ for it in range(nIter):
 # Done.
 
 print(time.time()-start)
-savelist.extend(("PSR","a0_evol"))
+savelist.extend(("PSR","param_evol"))
 
 if savestuff:
     print("Saving stuff")
@@ -175,4 +201,5 @@ if savestuff:
         
 # Fini ! Wait for click
 if plotstuff:
+    print("Done.")
     input()

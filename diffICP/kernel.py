@@ -282,7 +282,8 @@ class GaussKernel(GenKernel):
 
 # ------------------
 
-# Check:
+### Test reductions :
+
 if False:
 
     M, N, D, sig = 100, 1000, 2, 2.0
@@ -333,6 +334,52 @@ if False:
     print(vt)
     print(vback)  # different than vt, because matrix K is ill-conditioned
 
-
-
 # OK!
+
+### Plot some vector fields (for personal slide show)
+
+if False:
+    import matplotlib.pyplot as plt
+    plt.ion()
+    savefigs = False
+    savefigs_name = 'example_vector_field'
+    format = 'png'
+    bounds = (-0.5,1.5,-0.5,1.5)
+
+    from matplotlib.ticker import FormatStrFormatter
+
+    GK = GaussKernel(0.3, 2)
+    N = 3                  # number of support points
+
+    fig = plt.figure()
+    xvals = np.linspace(*bounds[:2], 20)
+    yvals = np.linspace(*bounds[2:], 20)
+    intersec = np.stack(np.meshgrid(xvals, yvals), axis=2)                               # grid intersection (shape (Nx,Ny,2))
+    intersec = torch.tensor(intersec.reshape((-1, 2), order='F'), **defspec).contiguous()  # convert to torch tensor (shape (Nx*Ny,2))
+
+    colors = ['red','green']
+    for i in range(2):
+        q = torch.rand((N,2))           # random support points
+        p = torch.randn((N,2))          # random momenta
+        vf = GK.KRed(intersec,q,p)      # vector field at intersections
+        print(f"v_{i}, vector norm : {(p*GK.KRed(q,q,p)).sum()}")
+
+        plt.quiver(intersec[:,0], intersec[:,1], vf[:,0], vf[:,1], scale=20, color=colors[i], width=0.005)
+        plt.xlim(*bounds[:2])
+        plt.ylim(*bounds[2:])
+        plt.xticks(np.arange(-10, 10, 0.5))
+        plt.yticks(np.arange(-10, 10, 0.5))
+        plt.gca().xaxis.set_major_formatter(FormatStrFormatter('%0.1f'))    # Ensure correctly formated ticks
+        plt.gca().set_aspect('equal')
+        plt.gca().autoscale(tight=True)
+        plt.pause(.1)
+        if i==0:
+            prev_q = q
+            prev_p = p
+        else:
+            print(f"cross scalar product : {(prev_p * GK.KRed(prev_q,q,p)).sum()}")
+        if savefigs:
+            plt.savefig(f"figs/{savefigs_name}_{i}.{format}", format=format, bbox_inches='tight')
+    input()
+
+
