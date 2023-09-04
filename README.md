@@ -33,6 +33,7 @@ Directory **diffICP** defines a python module containing the core functions. Mai
 Directory **examples** contains some use cases
   - *diffICP_basic.py* illustrates registration of a single point set to a known GMM model (Fig. 1 of the GSI article)
   - *diffICP_multi.py* illustrates registration of multiple point sets to a common GMM model that is inferred from the data (Fig. 2 of the GSI article)
+  - *two_set_ICP.py* illustrates the classic ICP problem (for two point sets), both in linear and diffeomorphic forms
   - *diffICP_full.py* illustrates a full model with multiple frames (e.g., patients) *and* multiple GMM models (e.g., brain structures) (not documented in the GSI article)
   
 ### Disclaimer
