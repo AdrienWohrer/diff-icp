@@ -24,21 +24,21 @@ from diffICP.Affine_logdet import AffineModel
 class Registration:
 
     # ---------------------
-    def apply(self, X):
+    def apply(self, X:torch.Tensor):
         '''Compute the registration of an external point set X.
         Y = apply(X)
         with X(N,D) some input points, and Y(N,D) their registered version'''
         pass
 
     # ---------------------
-    def backward(self, Y):
+    def backward(self, Y:torch.Tensor):
         '''Compute the BACKWARD registration of an external point set Y.
         X = backward(Y)
         produces X such that Y = apply(X)
         A shoot variable corresponding to a previous forward registration can be provided, to gain time (minimal!)'''
 
     # ---------------------
-    def shoot(self, X, backward=False):
+    def shoot(self, X:torch.Tensor, backward=False):
         '''Compute the 'shoot' variable on external point set X. (See LDDMM_logdet.py and Affine_logdet.py)'''
         pass
 
@@ -56,7 +56,7 @@ class LDDMMRegistration(Registration):
         self.a0 = a0
 
     # ---------------------
-    def shoot(self, X, backward=False, previous_forwardshoot=None):
+    def shoot(self, X:torch.Tensor, backward=False, previous_forwardshoot=None):
         '''Compute the LDDMM "shooting" on external point set X. Return a "shoot" variable (see LDDMM_logdet.py)
         When backward=True, uses the inverse diffeomorphism. In that case, a shoot variable corresponding to a previous
         forward registration can be provided, if available, to gain a little time (meh...)'''
@@ -72,7 +72,7 @@ class LDDMMRegistration(Registration):
             return self.LMi.Shoot(q1k, -a1k, X)
 
     # ---------------------
-    def apply(self, X):
+    def apply(self, X:torch.Tensor):
         '''Compute the registration of an external point set X.
         Y = apply(X)
         with X(N,D) some input points, and Y(N,D) their registered version'''
@@ -80,7 +80,7 @@ class LDDMMRegistration(Registration):
         return self.shoot(X)[-1][3]
 
     # ---------------------
-    def backward(self, Y, previous_forwardshoot=None):
+    def backward(self, Y:torch.Tensor, previous_forwardshoot=None):
         '''Compute the BACKWARD registration of an external point set Y.
         X = backward(Y)
         produces X such that Y = apply(X)
@@ -102,14 +102,14 @@ class AffineRegistration(Registration):
         self.t = t
 
     # ---------------------
-    def shoot(self, X):
+    def shoot(self, X:torch.Tensor):
         '''Compute the Affine "shooting" on external point set X. Return a "shoot" variable (see Affine_logdet.py)'''
         # TODO: backward version not implemented
 
         return self.AffMi.Shoot(self.M, self.t, X)
 
     # ---------------------
-    def apply(self, X):
+    def apply(self, X:torch.Tensor):
         '''Compute the registration of an external point set X.
         Y = apply(X)
         with X(N,D) some input points, and Y(N,D) their registered version'''
@@ -117,7 +117,7 @@ class AffineRegistration(Registration):
         return X @ self.M.t() + self.t[None,:]
 
     # ---------------------
-    def backward(self, Y):
+    def backward(self, Y:torch.Tensor):
         '''Compute the BACKWARD registration of an external point set Y.
         X = backward(Y)
         produces X such that Y = apply(X)'''

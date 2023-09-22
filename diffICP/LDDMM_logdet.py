@@ -17,7 +17,7 @@ import torch
 ### Import kernel reductions, from other file in this directory
 from diffICP.kernel import SVDpow, GaussKernel
 from diffICP.spec import defspec, getspec
-
+from diffICP.optim import LBFGS_optimization
 
 #####################################################################################################################
 ### Custom ODE solver, for ODE systems which are defined on tuples
@@ -263,10 +263,57 @@ class LDDMMModel:
             L = self.lam * self.Hamiltonian(q0,p0) + cost
         return L
 
-    ### Optimization of E(p0) (trajectory energy for geodesic shooting with initial momenta p0)
-    # (New version with additional non-support points x)
 
-    def Optimize(self, dataloss, q0, p0, x0=None, nmax=10, tol=1e-3, errthresh=1e8, **kwargs):
+    ### Optimization of E(p0) (trajectory energy for geodesic shooting with initial momenta p0)
+
+    def Optimize(self, dataloss, q0, p0, x0=None, nmax=10, tol=1e-3, errthresh=1e8):
+
+        spec = getspec(q0, p0, x0)
+
+        if x0 is None:
+            x0 = torch.empty(0, self.D, **spec)
+
+        # Make sure not to accumulate computation graph across successive calls to Optimize
+        q0 = q0.detach()
+        x0 = x0.detach()
+
+        # Loss function (total registration cost function = data loss + LDDMM traj cost)
+        def lossfunc(p0):
+            shoot = self.Shoot(q0, p0, x0)
+            q, _, _, x = shoot[-1]
+            L = self.trajloss(shoot) + dataloss(q, x)
+            return L
+
+        # Optimize lossfunc w.r.t. p0 (LBFGS algorithm, now externalized to helper function)
+        p0, nsteps, change = LBFGS_optimization([p0], lossfunc, nmax=nmax, tol=tol, errthresh=errthresh)
+        p0 = p0[0]
+
+        # TODO: various reset strategies when optimization failed
+        # Found no better value than p0prev. Try a "compromise" between two imperfect reset strategies:
+        # Option 1 : revert to previous parameters p0prev ---> but then global optimization loop might get stuck
+        # Option 2 : reset speeds at 0 --> but then all previous work in the global optimization loops is lost
+        # p0 = 0.9*p0prev + 0.1*self.v2p(q0, torch.zeros(q0.shape, **spec))
+        # print("Exiting current optimization of p0. Multiplicative modification of p0 towards zero speeds.")
+        # Option 3 : add some noise to (initial speeds encoded by) momentum p0prev
+        # rmod = 0.01
+        # p0 = p0prev + rmod * p0prev.std() * self.v2p(q0, torch.randn(q0.shape, **spec))
+        # print(
+        #     f"Exiting current optimization of p0. Trying a random perturbation of p0 from its current value, with relative strength {rmod}.")
+        
+        # One last shoot, just to compute variables of interest while they are easily accesible
+        shoot = self.Shoot(q0, p0, x0)
+        trajl = self.trajloss(shoot).item()
+        q, _, _, x = shoot[-1]
+        datal = dataloss(q, x).item()
+
+        # print("optim steps ", nsteps, " loss =", trajl+datal, " change =", change)
+        return p0, shoot, trajl, datal, nsteps, change
+
+
+    ### Optimization of E(p0) (trajectory energy for geodesic shooting with initial momenta p0)
+    ### Legacy version, should be removed soon
+
+    def Optimize_legacy(self, dataloss, q0, p0, x0=None, nmax=10, tol=1e-3, errthresh=1e8, **kwargs):
 
         spec = getspec(q0,p0,x0)
 
@@ -365,11 +412,14 @@ class LDDMMModel:
         return p0, shoot, trajl, datal, i, change
 
 
+
+###########################################################
+### Testing
 ###########################################################
 
 
-# Check:
-if False:
+if __name__ == '__main__':
+    # Running as a script
 
     M, D, sig, lam = 10, 2, 2.0, 100.0
     xt = torch.randn(M, D, **defspec)
@@ -386,11 +436,8 @@ if False:
     print(bt)
     print(pt)       # but bt != pt, because system has mutiple solutions, and pt has smaller norm than bt
 
-    input()
-
+    print('Yo')
     print(LDDMM.random_p(xt))
     ##    print("yeah")
     ##    print(LDDMM.random_p(xt, version='ridge'))       # fail when N big (matrix singular up to numeric precision)
-
-    exit()
 

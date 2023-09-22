@@ -45,7 +45,9 @@ def decimate(x,R):
     return kept, rejected
 
 # Testing
-if False:
+if __name__ == '__main__':
+    # Running as a script
+
     x = torch.randn(100,2)
     R = 0.5
     kept = decimate(x,R)

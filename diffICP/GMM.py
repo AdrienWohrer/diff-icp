@@ -25,7 +25,7 @@ else:
     print("Warning: pykeops not installed. Consider installing it, if you are on linux")
 
 from diffICP.spec import defspec, getspec
-from diffICP.visu import get_bounds
+from diffICP.visu import get_bounds, my_scatter
 from diffICP.registrations import Registration
 
 #####################################################################################
@@ -430,92 +430,95 @@ else:
 ###
 ############################################################################################
 
-### Test EM functions
+if __name__ == '__main__':
+    # Running as a script
 
-if False:
-    plt.ion()
-    
-    ## Create datapoints (spiral)
-    
-    N = 1000
-    t = torch.linspace(0, 2 * np.pi, N + 1)[:-1]
-    x = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
-    x = x + 0.02 * torch.randn(x.shape)
+    ### Test EM functions
+    if True:
 
-    ## Create datapoints (iris)
-    
-    #from sklearn.datasets import load_iris
-    #iris = load_iris()
-    #x = tensor(iris['data'])[:,:2].contiguous().type(torchdtype)  # 2 premières colonnes uniquement
-    #N = x.shape[0]
-    
-    # Launch EM
-    
-    C = 10
-    mu0 = x[torch.randint(0,N,(C,)),:]
-    GMM = GaussianMixtureUnif(mu0)
-    GMM.to_optimize = {
-        "mu" : True,
-        "sigma" : False,
-        "w" : False
-    }
-    
-    n = 0
-    while n<100:
-        n+=1
-        print(n)
-        plt.clf()
-        GMM.plot(x)
-        my_scatter(x)
+        plt.ion()
 
-        # Compare Pytorch and Keops E steps : OK
-        # lgam_torch = GMM.log_responsibilities(x)            # (N,C)
-        # print(softmax(lgam_torch,dim=0).t() @ x)            # (C,2)
-        # lgam_keops,_ = GMM.E_step_keops(x)
-        # print(lgam_keops.sumsoftmaxweight(Vi(x), axis=0).reshape(C,2))
+        ## Create datapoints (spiral)
 
-        print(GMM.likelihoods(x))
-        print(GMM.log_likelihoods(x))
+        N = 1000
+        t = torch.linspace(0, 2 * np.pi, N + 1)[:-1]
+        x = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
+        x = x + 0.02 * torch.randn(x.shape)
 
-        GMM.EM_step(x)
-#        GMM.EM_step_pytorch(x)
-#        print(GMM)
-#        input()
+        ## Create datapoints (iris)
+
+        #from sklearn.datasets import load_iris
+        #iris = load_iris()
+        #x = tensor(iris['data'])[:,:2].contiguous().type(torchdtype)  # 2 premières colonnes uniquement
+        #N = x.shape[0]
+
+        # Launch EM
+
+        C = 10
+        mu0 = x[torch.randint(0,N,(C,)),:]
+        GMM = GaussianMixtureUnif(mu0)
+        GMM.to_optimize = {
+            "mu" : True,
+            "sigma" : False,
+            "w" : False
+        }
+
+        n = 0
+        while n<100:
+            n+=1
+            print(n)
+            plt.clf()
+            GMM.plot(x)
+            my_scatter(x)
+
+            # Compare Pytorch and Keops E steps : OK
+            # lgam_torch = GMM.log_responsibilities(x)            # (N,C)
+            # print(softmax(lgam_torch,dim=0).t() @ x)            # (C,2)
+            # lgam_keops,_ = GMM.E_step_keops(x)
+            # print(lgam_keops.sumsoftmaxweight(Vi(x), axis=0).reshape(C,2))
+
+            print(GMM.likelihoods(x))
+            print(GMM.log_likelihoods(x))
+
+            GMM.EM_step(x)
+    #        GMM.EM_step_pytorch(x)
+    #        print(GMM)
+    #        input()
+            plt.pause(.1)
+
+        # input()
+    
+
+    ### Test plotting function with registration (experimental!)
+    if True:
+
+        plt.ion()
+        bounds = (-0.5,1.5,-0.5,1.5)
+
+        ### Load existing diffeomorphic registration (simpler)
+        from diffICP.spec import CPU_Unpickler
+        loadfile = "saving/test_basic.pkl"
+        with open(loadfile, 'rb') as f:
+            yo = CPU_Unpickler(f).load()        # modified dill Unpickler (see diffPSR.spec.CPU_Unpickler)
+        reg = yo["PSR"].Registration()
+        amplif = 1                              # modify strength of a0 (for testing)
+        reg.a0 *= amplif
+
+        ### Also apply registration to a grid, for visualization
+        from diffICP.grid import Gridlines
+        bounds = (-0.5,1.5,-0.5,1.5)
+        gridlines = Gridlines(np.linspace(*bounds[:2],30), np.linspace(*bounds[2:],30))
+        reglines = gridlines.register(reg, backward=True)
+
+        ### Apply registration to GMM model
+        GMM = GaussianMixtureUnif(mu0=torch.tensor([[0.8,0.4],[0.2,0.5],[0.5,0.6]],**defspec))
+        GMM.sigma = 0.1
+        GMM.w = torch.tensor([0,0.5,1],**defspec)
+        plt.figure()
+        GMM.plot(bounds=bounds)
+        gridlines.plot(color='gray',linewidth=0.5)
+        plt.figure()
+        GMM.plot(registration=reg, bounds=bounds)
+        reglines.plot(color='gray',linewidth=0.5)
         plt.pause(.1)
-    
-    input()
-    
-
-### Test plotting function with registration (experimental!)
-
-if False:
-    plt.ion()
-    bounds = (-0.5,1.5,-0.5,1.5)
-
-    ### Load existing diffeomorphic registration (simpler)
-    from diffICP.spec import CPU_Unpickler
-    loadfile = "saving/test_basic.pkl"
-    with open(loadfile, 'rb') as f:
-        yo = CPU_Unpickler(f).load()        # modified dill Unpickler (see diffPSR.spec.CPU_Unpickler)
-    reg = yo["PSR"].Registration()
-    amplif = 1                              # modify strength of a0 (for testing)
-    reg.a0 *= amplif
-
-    ### Also apply registration to a grid, for visualization
-    from diffICP.grid import Gridlines
-    bounds = (-0.5,1.5,-0.5,1.5)
-    gridlines = Gridlines(np.linspace(*bounds[:2],30), np.linspace(*bounds[2:],30))
-    reglines = gridlines.register(reg, backward=True)
-
-    ### Apply registration to GMM model
-    GMM = GaussianMixtureUnif(mu0=torch.tensor([[0.8,0.4],[0.2,0.5],[0.5,0.6]],**defspec))
-    GMM.sigma = 0.1
-    GMM.w = torch.tensor([0,0.5,1],**defspec)
-    plt.figure()
-    GMM.plot(bounds=bounds)
-    gridlines.plot(color='gray',linewidth=0.5)
-    plt.figure()
-    GMM.plot(registration=reg, bounds=bounds)
-    reglines.plot(color='gray',linewidth=0.5)
-    plt.pause(.1)
-    input()
+        input()

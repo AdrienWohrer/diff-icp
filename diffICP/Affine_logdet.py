@@ -166,7 +166,9 @@ class AffineModel:
 ##############################################################
 ### Test
 
-if False:
+if __name__ == '__main__':
+    # Running as a script
+
     AM = AffineModel(3, version="rigid", withlogdet=True, with_t=True, nt=10)
     X = torch.randn(100,3, **defspec)
     Y = torch.randn(100,3, **defspec)

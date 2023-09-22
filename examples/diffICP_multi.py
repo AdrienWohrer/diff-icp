@@ -4,9 +4,9 @@ Testing the diffICP algorithm on multiple point set registration (statistical at
 
 import time, copy
 import numpy as np
+import dill
 from matplotlib import pyplot as plt
 plt.ion()
-
 import torch
 
 from pykeops.torch import Vi, Vj, LazyTensor, Pm
@@ -26,15 +26,16 @@ from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
 from diffICP.visu import my_scatter
 from diffICP.spec import defspec, getspec
+from examples.generate_spiral_point_sets import generate_spiral_point_sets
 
 ###################################################################
 # Saving simulation results (with dill, a generalization of pickle)
-savestuff = False
-import dill
+
+savestuff = True
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
-savefile = "saving/registration_multi_1.pkl"
+savefile = "saving/registration_multi_spiral_1.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
@@ -44,81 +45,33 @@ plotstuff = True
 nIter = 30
 
 ###################################################################
-### Part 1 : Synthetic data generation
+### Part 1 : Synthetic data : 'spiral' point sets
 ###################################################################
 
-
-###################################################################
-### "Ground truth" generative GMM model
-
-# Use the spiral formula to draw (deterministic) centroids for GMMg
-C = 20
-t = torch.linspace(0, 2 * np.pi, C + 1)[:-1]
-mu0 = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
-
-GMMg = GaussianMixtureUnif(mu0)
-GMMg.sigma = 0.025          # ad hoc
-
-if False:
-    print(GMMg)
-    GMMg.plot()
-    plt.show()
-    input()
-
-###################################################################
-### "Ground truth" generative LDDMM model
-
-LMg = LDDMMModel(sigma = 0.2,  # sigma of the Gaussian kernel
-                 D=2,  # dimension of space
-                 lambd= 1e2,  # lambda of the LDDMM regularization
-                 version = "classic",
-                 nt = 10)                   # time discretization of interval [0,1] for ODE resolution
-
-###################################################################
-### Generate (or reload) samples
-
-reload = False
+reload = True
 if reload:
-    # Load from a previous simulation file
-
-    loadfile = "saving/registration_multi_1.pkl"
-    print("Loading data points from previous file : ",loadfile)
+    loadfile = "saving/sample_spiral_points_1.pkl"
+    print("Loading data points from existing file : ",loadfile)
     with open(loadfile, 'rb') as f:
         yo = dill.load(f)
-    for key in savelist:
+    for key in ["GMMg","LMg","x0"]:
         globals()[key] = yo[key]
 
 else:
-    # Generate new samples
+    x0, GMMg, LMg = generate_spiral_point_sets(K=10, Nkbounds=(100,121),
+                                               sigma_GMM=0.025,
+                                               sigma_LDDMM=0.1, lambda_LDDMM=1e2)
 
-    K = 10                                      # Number of point sets
-    Nkbounds = 100,120                          # Bounds on the number of points in each point set
-    Nk = torch.randint(*Nkbounds, (K,))         # (Random) number of points in each point set
-    print("Number of point sets: ", K)
-    print("Number of points in each point set:\n", Nk)
-
-    x0 = []
-    for k in range(K):
-        xb = GMMg.get_sample(Nk[k])             # basic GMM sample
-
-        # Random deformation moments (from LDDMM model LMg).
-        a0b = LMg.random_p(xb,
-    ##        version="svd", rcond=1/LMg.lam)     #  (Value of rcond is ad hoc)
-            version="ridge", alpha=10)          # (Value of alpha is ad hoc)
-        
-        shoot = LMg.Shoot(xb, a0b)              # shooting !
-        phi1 = shoot[-1][0]                     # arrival (deformed) points
-        x0.append(phi1)                         # store point set
+K = len(x0)                         # Number of point sets
+Nk = [x.shape[0] for x in x0]       # Number of points in each set
 
 ### Plot some data points
-
 if plotstuff:
     GMMg.plot(*x0)
     my_scatter(*x0[:5])
     plt.pause(.2)
 
-### Variables that will be saved (also add a0g and x0g for illustration!)
-
+### Variables that will be saved
 savelist.extend(("GMMg","LMg","K","Nk","x0"))
 
 

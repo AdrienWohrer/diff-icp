@@ -95,7 +95,9 @@ class Gridlines:
 
 ### Testing
 
-if False:
+if __name__ == '__main__':
+    # Running as a script
+
     plt.ion()
     savefigs = False
     savename = 'grid_diffeo'

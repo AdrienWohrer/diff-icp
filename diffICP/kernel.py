@@ -24,12 +24,17 @@ from diffICP.spec import defspec, getspec
 
 
 ############################################################################################################
-# Helper function : SVD-based (pseudo-)power of a hermitian matrix 
-# M = PyTorch hermitian matrix
-# alpha = sought power, i.e., return M**alpha
-# rcond = relative cut-off on SVD (warning: big influence on result when alpha<0)
+############################################################################################################
+
 
 def SVDpow(M, alpha, rcond=None):
+    '''
+     Helper function : SVD-based (pseudo-)power of a hermitian matrix.
+    :param M:  PyTorch hermitian matrix
+    :param alpha: sought power, i.e., return M**alpha
+    :param rcond: relative cut-off on SVD (warning: big influence on result when alpha<0)
+    :return: M**alpha as a Pytorch tensor
+    '''
     U, S, Vh = torch.linalg.svd(M)      # torch 2.0
     if rcond is not None:
         keep = S > rcond * S[0]
@@ -82,6 +87,9 @@ class GenKernel:
 
             x, y, b, c = Vi(0,D), Vj(1,D), Vj(2,D), Vi(3,D)      # Symbolic argument passing (faster)
             K = self.K_keops(x, y)
+
+            # USAGE : GK.KBase(x,y)    --> PyTorch tensor of size (M,)    --> X(i) = \sum_j K(x_i-y_j)
+            self.KBase_keops = K.sum_reduction(axis=1)
 
             # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
             self.KRed_keops = (K * b).sum_reduction(axis=1)
@@ -185,6 +193,10 @@ class GaussKernel(GenKernel):
     def GradK_pytorch(self, x, y):
         return self.K_pytorch(x, y)[:,:,None] * (y[None,:,:]-x[:,None,:]) / self.sigma**2
 
+    # USAGE : GK.KBase(x,y)    --> PyTorch tensor of size (M,)    --> X(i) = \sum_j K(x_i-y_j)
+    def KBase_pytorch(self, x, y):
+        return torch.sum(self.K_pytorch(x,y), 1)
+
     # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
     def KRed_pytorch(self, x, y, b):
         return torch.sum(self.K_pytorch(x,y)[:, :, None] * b[None,:, :], 1)
@@ -250,13 +262,13 @@ class GaussKernel(GenKernel):
         # Aliases for the reductions (keops or pytorch version) :
         if computversion == 'keops':
             # KeOps versions : work even for large datasets
-            self.KRed, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
-                = self.KRed_keops, self.GradKRed_keops, self.DDKRed_keops, self.GenDKRed_keops, self.HessKRed_keops, \
+            self.KBase, self.KRed, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
+                = self.KBase_keops, self.KRed_keops, self.GradKRed_keops, self.DDKRed_keops, self.GenDKRed_keops, self.HessKRed_keops, \
                 self.LapKRed_keops, self.GradLapKRed_keops, self.GradKRed_rev_keops
         elif computversion == "pytorch":
             # PyTorch versions : faster on CPU + small datasets ; crash on large datasets
-            self.KRed, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
-                = self.KRed_pytorch, self.GradKRed_pytorch, self.DDKRed_pytorch, self.GenDKRed_pytorch, \
+            self.KBase, self.KRed, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
+                = self.KBase_pytorch, self.KRed_pytorch, self.GradKRed_pytorch, self.DDKRed_pytorch, self.GenDKRed_pytorch, \
                 self.HessKRed_pytorch, self.LapKRed_pytorch, self.GradLapKRed_pytorch, self.GradKRed_rev_pytorch
         else:
             raise ValueError("unkown version")
@@ -280,106 +292,112 @@ class GaussKernel(GenKernel):
         self.__dict__.update(state)
         self.spec = defspec
 
-# ------------------
 
-### Test reductions :
-
-if False:
-
-    M, N, D, sig = 100, 1000, 2, 2.0
-    xt = torch.randn(M, D).to(**defspec)
-    yt = torch.randn(N, D).to(**defspec)
-    bt = torch.randn(N, D).to(**defspec)
-    vt = torch.randn(M, D).to(**defspec)
-
-    GK = GaussKernel(sig, D, spec=defspec)
-
-    ### Test all reductions (KeOps vs Pytorch versions)
-
-    print(GK.KRed_pytorch(xt, yt, bt)[:5])  # version PyTorch
-    print(GK.KRed_keops(xt, yt, bt)[:5])  # version KeOps
-
-    print(GK.GradKRed_keops(xt, yt)[:5])  # version KeOps
-    print(GK.GradKRed_pytorch(xt, yt)[:5])  # version PyTorch
-
-    print(GK.LapKRed_keops(xt, yt)[:5])  # version KeOps
-    print(GK.LapKRed_pytorch(xt, yt)[:5])  # version PyTorch
-
-    print(GK.DDKRed_keops(xt, yt, bt)[:5])  # version KeOps
-    print(GK.DDKRed_pytorch(xt, yt, bt)[:5])  # version PyTorch
-
-    print(GK.GenDKRed_keops(xt, yt, bt, vt)[:5])  # version KeOps
-    print(GK.GenDKRed_pytorch(xt, yt, bt, vt)[:5])  # version PyTorch
-
-    print(GK.HessKRed_keops(xt, yt, bt, vt)[:5])  # version KeOps
-    print(GK.HessKRed_pytorch(xt, yt, bt, vt)[:5])  # version PyTorch
-
-    print(GK.GradLapKRed_keops(xt, yt)[:5])  # version KeOps
-    print(GK.GradLapKRed_pytorch(xt, yt)[:5])  # version PyTorch
-
-    ### Test "reversed" gradient sum reduction
-
-    print((vt*GK.GradKRed_keops(xt, yt)).sum())  # version KeOps
-    print(GK.GradKRed_rev_keops(xt, yt, vt).sum())  # version KeOps (reversed)
-    print(GK.GradKRed_rev_pytorch(xt, yt, vt).sum())  # version pytorch (reversed)
-
-    exit()
-
-    ### Test pseudo-inverses
-
-    yo = GK.KpinvSolve(xt, vt, rcond=1e-6)
-    print(yo)
-
-    vback = GK.KRed(xt, xt, yo)
-    print(vt)
-    print(vback)  # different than vt, because matrix K is ill-conditioned
-
-# OK!
-
-### Plot some vector fields (for personal slide show)
-
-if False:
-    import matplotlib.pyplot as plt
-    plt.ion()
-    savefigs = False
-    savefigs_name = 'example_vector_field'
-    format = 'png'
-    bounds = (-0.5,1.5,-0.5,1.5)
-
-    from matplotlib.ticker import FormatStrFormatter
-
-    GK = GaussKernel(0.3, 2)
-    N = 3                  # number of support points
-
-    fig = plt.figure()
-    xvals = np.linspace(*bounds[:2], 20)
-    yvals = np.linspace(*bounds[2:], 20)
-    intersec = np.stack(np.meshgrid(xvals, yvals), axis=2)                               # grid intersection (shape (Nx,Ny,2))
-    intersec = torch.tensor(intersec.reshape((-1, 2), order='F'), **defspec).contiguous()  # convert to torch tensor (shape (Nx*Ny,2))
-
-    colors = ['red','green']
-    for i in range(2):
-        q = torch.rand((N,2))           # random support points
-        p = torch.randn((N,2))          # random momenta
-        vf = GK.KRed(intersec,q,p)      # vector field at intersections
-        print(f"v_{i}, vector norm : {(p*GK.KRed(q,q,p)).sum()}")
-
-        plt.quiver(intersec[:,0], intersec[:,1], vf[:,0], vf[:,1], scale=20, color=colors[i], width=0.005)
-        plt.xlim(*bounds[:2])
-        plt.ylim(*bounds[2:])
-        plt.xticks(np.arange(-10, 10, 0.5))
-        plt.yticks(np.arange(-10, 10, 0.5))
-        plt.gca().xaxis.set_major_formatter(FormatStrFormatter('%0.1f'))    # Ensure correctly formated ticks
-        plt.gca().set_aspect('equal')
-        plt.gca().autoscale(tight=True)
-        plt.pause(.1)
-        if i==0:
-            prev_q = q
-            prev_p = p
-        else:
-            print(f"cross scalar product : {(prev_p * GK.KRed(prev_q,q,p)).sum()}")
-        if savefigs:
-            plt.savefig(f"figs/{savefigs_name}_{i}.{format}", format=format, bbox_inches='tight')
-    input()
+######################################################################################
+#
+# Testing
+#
+######################################################################################
 
 
+if __name__ == '__main__':
+    # Running as a script
+
+    ### Test reductions :
+    if True:
+
+        M, N, D, sig = 100, 1000, 2, 2.0
+        xt = torch.randn(M, D).to(**defspec)
+        yt = torch.randn(N, D).to(**defspec)
+        bt = torch.randn(N, D).to(**defspec)
+        vt = torch.randn(M, D).to(**defspec)
+
+        GK = GaussKernel(sig, D, spec=defspec)
+
+        ### Test all reductions (KeOps vs Pytorch versions)
+
+        print(GK.KRed_pytorch(xt, yt, bt)[:5])  # version PyTorch
+        print(GK.KRed_keops(xt, yt, bt)[:5])  # version KeOps
+
+        print(GK.GradKRed_keops(xt, yt)[:5])  # version KeOps
+        print(GK.GradKRed_pytorch(xt, yt)[:5])  # version PyTorch
+
+        print(GK.LapKRed_keops(xt, yt)[:5])  # version KeOps
+        print(GK.LapKRed_pytorch(xt, yt)[:5])  # version PyTorch
+
+        print(GK.DDKRed_keops(xt, yt, bt)[:5])  # version KeOps
+        print(GK.DDKRed_pytorch(xt, yt, bt)[:5])  # version PyTorch
+
+        print(GK.GenDKRed_keops(xt, yt, bt, vt)[:5])  # version KeOps
+        print(GK.GenDKRed_pytorch(xt, yt, bt, vt)[:5])  # version PyTorch
+
+        print(GK.HessKRed_keops(xt, yt, bt, vt)[:5])  # version KeOps
+        print(GK.HessKRed_pytorch(xt, yt, bt, vt)[:5])  # version PyTorch
+
+        print(GK.GradLapKRed_keops(xt, yt)[:5])  # version KeOps
+        print(GK.GradLapKRed_pytorch(xt, yt)[:5])  # version PyTorch
+
+        ### Test "reversed" gradient sum reduction
+
+        print((vt*GK.GradKRed_keops(xt, yt)).sum())  # version KeOps
+        print(GK.GradKRed_rev_keops(xt, yt, vt).sum())  # version KeOps (reversed)
+        print(GK.GradKRed_rev_pytorch(xt, yt, vt).sum())  # version pytorch (reversed)
+
+        exit()
+
+        ### Test pseudo-inverses
+
+        yo = GK.KpinvSolve(xt, vt, rcond=1e-6)
+        print(yo)
+
+        vback = GK.KRed(xt, xt, yo)
+        print(vt)
+        print(vback)  # different than vt, because matrix K is ill-conditioned
+
+    # OK!
+
+    ### Plot some vector fields (for personal slide show)
+    if False:
+
+        import matplotlib.pyplot as plt
+        plt.ion()
+        savefigs = False
+        savefigs_name = 'example_vector_field'
+        format = 'png'
+        bounds = (-0.5,1.5,-0.5,1.5)
+
+        from matplotlib.ticker import FormatStrFormatter
+
+        GK = GaussKernel(0.3, 2)
+        N = 3                  # number of support points
+
+        fig = plt.figure()
+        xvals = np.linspace(*bounds[:2], 20)
+        yvals = np.linspace(*bounds[2:], 20)
+        intersec = np.stack(np.meshgrid(xvals, yvals), axis=2)                               # grid intersection (shape (Nx,Ny,2))
+        intersec = torch.tensor(intersec.reshape((-1, 2), order='F'), **defspec).contiguous()  # convert to torch tensor (shape (Nx*Ny,2))
+
+        colors = ['red','green']
+        for i in range(2):
+            q = torch.rand((N,2))           # random support points
+            p = torch.randn((N,2))          # random momenta
+            vf = GK.KRed(intersec,q,p)      # vector field at intersections
+            print(f"v_{i}, vector norm : {(p*GK.KRed(q,q,p)).sum()}")
+
+            plt.quiver(intersec[:,0], intersec[:,1], vf[:,0], vf[:,1], scale=20, color=colors[i], width=0.005)
+            plt.xlim(*bounds[:2])
+            plt.ylim(*bounds[2:])
+            plt.xticks(np.arange(-10, 10, 0.5))
+            plt.yticks(np.arange(-10, 10, 0.5))
+            plt.gca().xaxis.set_major_formatter(FormatStrFormatter('%0.1f'))    # Ensure correctly formated ticks
+            plt.gca().set_aspect('equal')
+            plt.gca().autoscale(tight=True)
+            plt.pause(.1)
+            if i==0:
+                prev_q = q
+                prev_p = p
+            else:
+                print(f"cross scalar product : {(prev_p * GK.KRed(prev_q,q,p)).sum()}")
+            if savefigs:
+                plt.savefig(f"figs/{savefigs_name}_{i}.{format}", format=format, bbox_inches='tight')
+        input()

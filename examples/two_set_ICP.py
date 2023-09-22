@@ -51,7 +51,7 @@ savefigs_name = 'figs/ICP_diffeomorphe/figure'
 savefigs_format = 'png'
 
 # Number of global loop iterations
-nIter = 100
+nIter = 40
 
 # Basic (non probabilistic) ICP ?
 basic_ICP = False

@@ -40,25 +40,27 @@ from diffICP.spec import defspec, getspec
 class multiPSR:
 
     ###################################################################
-    # Initialization
-    #
-    # x = list of input point sets. Three possible formats:
-    #  - x = torch tensor of size (N, D) : single point set
-    #  - x[k] = torch tensor of size (N[k], D) : point set from frame k
-    #  - x[k][s] = torch tensor of size (N[k,s], D) : point set in structure s from frame k
-    #
-    # GMMi = GMM model (and parameters) used in the algorithm. Two possible formats:
-    #  - GMMi = single GMM model (for a single structure)
-    #  - GMMi[s] = GMM model for structure s
-    # In any case, the GMMs given as input will be *copied* in the multiPSR object
 
-    # - dataspec : spec (dtype+device) under which all point sets are stored (see diffICP/spec.py)
-    # - compspec : spec (dtype+device) under which the actual computations (GMM and registrations) will be performed
-    # These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
-    # but there are too many frames/point sets to store them all on the Gpu (use dataspec["device"]='cpu')
-    # Of course, ideally, everything should be kept on the same device to avoid copies between devices
 
-    def __init__(self, x, GMMi, dataspec=defspec, compspec=defspec):
+    def __init__(self, x, GMMi: GaussianMixtureUnif, dataspec=defspec, compspec=defspec):
+        '''
+        :param x: list of input point sets. Three possible formats:
+            x = torch tensor of size (N, D) : single point set;
+            x[k] = torch tensor of size (N[k], D) : point set from frame k;
+            x[k][s] = torch tensor of size (N[k,s], D) : point set in structure s from frame k;
+
+        :param GMMi: GMM model (and parameters) used in the algorithm. Two possible formats:
+            GMMi = single GMM model (for a single structure);
+            GMMi[s] = GMM model for structure s;
+            In any case, the GMMs given as input will be *copied* in the multiPSR object;
+
+        :param dataspec: spec (dtype+device) under which all point sets are stored (see diffICP/spec.py)
+
+        :param compspec: spec (dtype+device) under which the actual computations (GMM and registrations) will be performed.
+            These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
+            but there are too many frames/point sets to store them all on the Gpu (use dataspec["device"]='cpu').
+            Of course, ideally, everything should be kept on the same device to avoid copies between devices.
+        '''
 
         self.dataspec, self.compspec = dataspec, compspec
 
@@ -156,16 +158,22 @@ class multiPSR:
 
 
     ################################################################
-    ### Update quadratic error between point sets x1[k,s] (warped points) and y[k,s] (GMM target points)
+    ################################################################
 
     def update_quadloss(self, k, s):
+        '''Update quadratic error between point sets x1[k,s] (warped points) and y[k,s] (GMM target points)'''
+
         self.quadloss[k,s] = ((self.x1[k,s]-self.y[k,s])**2).sum() / (2 * self.GMMi[s].sigma ** 2)
 
 
     ################################################################
-    ### Recompute and store current value of free energy
+    ################################################################
 
     def update_FE(self, message=""):
+        '''
+        Recompute and store current value of free energy.
+        '''
+
         FE = sum(self.Cfe) + sum(self.regloss) + self.quadloss.sum().item()
         print(message.ljust(70)+f"Total free energy = {FE:.8}")
         if self.last_FE is not None and FE > self.last_FE:
@@ -174,9 +182,12 @@ class multiPSR:
 
 
     ################################################################
-    ### Partial optimization function, GMM part (for each structure s in turn)
+    ################################################################
 
     def GMM_opt(self, repeat=1):
+        '''
+        Partial optimization function, GMM part (for each structure s in turn).
+        '''
 
         for s in range(self.S):
             allx1s = torch.cat(tuple(self.x1[:,s]), dim=0).to(**self.compspec)
@@ -202,18 +213,26 @@ class multiPSR:
 
 
     ################################################################
-    ### Partial optimization, registration part (for each frame k in turn)
-    # This is a virtual function, to be redefined in each derived class
+    ################################################################
 
     def Reg_opt(self, tol=1e-5):
+        '''
+        Partial optimization, registration part (for each frame k in turn).
+        This is a virtual function, to be redefined in each derived class.
+        '''
+
         raise NotImplementedError("function Reg_opt must be written in derived classes.")
 
 
     ################################################################
-    ### For convenience : return an "interface" class providing easy registration of external point sets. See registrations.py
+    ################################################################
 
     def Registration(self, k=0):
-        '''return a "Registration object" for frame number k (k=0 for single frame)'''
+        '''
+        Return a `registration` object for frame number k (k=0 by default, when there is a single frame).
+        `registration` objects are convenient interfaces to apply a registration to an external set of points. See registrations.py.
+        '''
+
         if isinstance(self, diffPSR):
             return LDDMMRegistration(self.LMi, self.q0[k], self.a0[k])
         elif isinstance(self, affinePSR):
@@ -221,12 +240,16 @@ class multiPSR:
 
 
     ################################################################
-    ### For convenience : visualization of trajectories for frame k
-    # support = only used in class diffPSR: visualize trajectories of support points only (if True)
-    # shoot = custom 'shoot' variable
-    # kwargs = plotting arguments
+    ################################################################
 
     def plot_trajectories(self, k=0, support=False, shoot=None, **kwargs):
+        '''
+        Visualization of trajectories for the point sets in the registration process.
+        :param k: frame to represent (k=0 by default, when there is a single frame).
+        :param support: only used in class diffPSR. If true, visualize trajectories of support points only.
+        :param shoot: custom "shoot" variable containing the trajectories (can be used to visualize trajectories for an "external" set of points).
+        :param kwargs: plotting arguments passed to pyplot.plot
+        '''
 
         # Some default plotting values
         if "alpha" not in kwargs.keys():
@@ -261,23 +284,40 @@ class multiPSR:
 #######################################################################
 
 class diffPSR(multiPSR):
+    '''
+    multiPSR algorithm with diffeomorphic (LDDMM) registrations.
+    '''
 
-    ###################################################################
-    # Initialization
-    #
-    # x = list of input point sets, as in multiPSR
-    # GMMi = GMM model (and parameters) used in the algorithm, as in multiPSR
-    #
-    # LMi = LLDDMM model (and parameters) used in the algorithm, as provided in class LDDMMModel
-    #
-    # Possible decimation to derive LDDMM support points. A smaller support point set (larger Rdecim) allows to accelerate
-    # the LDDMM optimization. (Note that the registration + GMM optimization still apply to the full sets of points.)
-    #   - Rdecim : pick LDDMM support points out of the full point sets, through a greedy decimation algorithm,
-    #     ensuring that the support points cover the full point sets with a covering radius of Rdecim*LMi.Kernel.sigma
-    #   - A warning is issued if some non-support point ends up at a distance > Rcoverwarning*LMi.Kernel.sigma
-    #     from all support points, at any time during the shooting procedure (unlike Rdecim which only concerns time t=0)
+    def __init__(self, x, GMMi: GaussianMixtureUnif, LMi: LDDMMModel, dataspec=defspec, compspec=defspec, Rdecim=None, Rcoverwarning=None):
+        '''
+        :param x: list of input point sets. Three possible formats:
+            x = torch tensor of size (N, D) : single point set;
+            x[k] = torch tensor of size (N[k], D) : point set from frame k;
+            x[k][s] = torch tensor of size (N[k,s], D) : point set in structure s from frame k;
 
-    def __init__(self, x, GMMi, LMi, dataspec=defspec, compspec=defspec, Rdecim=None, Rcoverwarning=None):
+        :param LMi: LLDDMM model (and parameters) used in the algorithm, as provided in class LDDMMModel. See LDDMM_logdet.py
+
+        :param GMMi: GMM model (and parameters) used in the algorithm. Two possible formats:
+            GMMi = single GMM model (for a single structure);
+            GMMi[s] = GMM model for structure s;
+            In any case, the GMMs given as input will be *copied* in the multiPSR object;
+
+        :param dataspec: spec (dtype+device) under which all point sets are stored (see diffICP/spec.py)
+
+        :param compspec: spec (dtype+device) under which the actual computations (GMM and registrations) will be performed.
+            These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
+            but there are too many frames/point sets to store them all on the Gpu (use dataspec["device"]='cpu').
+            Of course, ideally, everything should be kept on the same device to avoid copies between devices.
+
+        :param Rdecim: Possible decimation to derive LDDMM support points. A smaller support point set (larger Rdecim)
+            allows to accelerate the LDDMM optimization. (Note that the registration + GMM optimization still apply
+            to the full sets of points.)
+            We pick LDDMM support points out of the full point sets, through a greedy decimation algorithm, ensuring
+            that the support points cover the full point sets with a covering radius of Rdecim*LMi.Kernel.sigma
+
+        :param Rcoverwarning: A warning is issued if some non-support point ends up at a distance > Rcoverwarning*LMi.Kernel.sigma
+            from all support points, at any time during the shooting procedure (unlike Rdecim which only concerns time t=0).
+        '''
 
         # Initialize common features of the algorithm (class multiPSR)
         super().__init__(x, GMMi, dataspec=dataspec, compspec=compspec)
@@ -328,12 +368,15 @@ class diffPSR(multiPSR):
 
 
     ################################################################
-    ### Partial optimization, LDDMM part (for each frame k in turn)
-
-    ## Functor returning the data loss function to use in LDDMM optimization for frame k. That is, (q,x) --> dataloss(q,x)
-    # with q all support points in frame k, and x all non-support points in frame k, concatenated across all structures s
+    ################################################################
 
     def QuadLossFunctor(self, k):
+        '''
+        Partial optimization, LDDMM part (for frame k).
+
+        :return : the data loss function to use in LDDMM optimization for frame k. That is, (q,x) --> dataloss(q,x)
+            with q all support points in frame k, and x all non-support points in frame k, concatenated across all structures s.
+        '''
 
         # quadratic targets (make a contiguous copy to optimize keops reductions)
         y_supp = torch.cat(tuple( self.y[k,s][self.supp_ids[k,s,0]] for s in range(self.S) ), dim=0
@@ -351,9 +394,16 @@ class diffPSR(multiPSR):
 
         return dataloss_func
 
-    ## LDDMM registration optimization function
+
+    ################################################################
+    ################################################################
 
     def Reg_opt(self, nmax=10, tol=1e-3):
+        '''
+        LDDMM registration optimization function.
+        :param nmax : max number of iterations.
+        :param tol : relative tolerance for stopping (before nmax).
+        '''
 
         for k in range(self.K):
             ### Optimize a0[k] (the long line!)
@@ -395,22 +445,39 @@ class diffPSR(multiPSR):
 ### Derived class affinePSR : multiPSR with affine (viz. euclidian, rigid) registrations
 ###
 #######################################################################
-# T(X) = X * M' + t'      with
-# X(N,d): input data points
-# t(d,1): translation vector
-# M(d,d): linear deformation matrix
 
 class affinePSR(multiPSR):
+    '''
+    multiPSR algorithm with affine (viz. euclidian, rigid) registrations. That is,
+        T(X) = X * M' + t'      with
 
-    ###################################################################
-    # Initialization
-    #
-    # x = list of input point sets, as in multiPSR
-    # GMMi = GMM model (and parameters) used in the algorithm, as in multiPSR
-    # AffMi = Affine model (and parameters) used in the algorithm, as provided in class AffineModel
-    # version = 'euclidian' (rotation+translation), 'rigid' (euclidian+scaling), 'linear' (unconstrained affine)
+        X(N,d): input data points ;
+        t(d,1): translation vector ;
+        M(d,d): linear deformation matrix ;
+    '''
 
-    def __init__(self, x, GMMi, AffMi, dataspec=defspec, compspec=defspec):
+    def __init__(self, x, GMMi: GaussianMixtureUnif, AffMi: AffineModel, dataspec=defspec, compspec=defspec):
+        '''
+        :param x: list of input point sets. Three possible formats:
+            x = torch tensor of size (N, D) : single point set;
+            x[k] = torch tensor of size (N[k], D) : point set from frame k;
+            x[k][s] = torch tensor of size (N[k,s], D) : point set in structure s from frame k;
+
+        :param GMMi: GMM model (and parameters) used in the algorithm. Two possible formats:
+            GMMi = single GMM model (for a single structure);
+            GMMi[s] = GMM model for structure s;
+            In any case, the GMMs given as input will be *copied* in the multiPSR object;
+
+        :param AffMi: Affine model (and parameters) used in the algorithm, as provided in class AffineModel.
+            In particular, version = 'euclidian' (rotation+translation), 'rigid' (euclidian+scaling), 'linear' (unconstrained affine).
+
+        :param dataspec: spec (dtype+device) under which all point sets are stored (see diffICP/spec.py)
+
+        :param compspec: spec (dtype+device) under which the actual computations (GMM and registrations) will be performed.
+            These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
+            but there are too many frames/point sets to store them all on the Gpu (use dataspec["device"]='cpu').
+            Of course, ideally, everything should be kept on the same device to avoid copies between devices.
+        '''
 
         # Initialize common features of the algorithm (class multiPSR)
         super().__init__(x, GMMi, dataspec=dataspec, compspec=compspec)
@@ -419,10 +486,15 @@ class affinePSR(multiPSR):
         self.M = [torch.eye(self.D, **dataspec)] * self.K
         self.t = [torch.zeros(self.D, **dataspec)] * self.K
 
+
     ################################################################
-    ### Partial optimization, registration part (for each frame k in turn)
+    ################################################################
 
     def Reg_opt(self, tol=1e-5):
+        '''
+        Affine registration optimization function.
+        :param tol : relative tolerance for stopping (before nmax).
+        '''
 
         for k in range(self.K):
             ### Find best-fitting linear transform for frame k
