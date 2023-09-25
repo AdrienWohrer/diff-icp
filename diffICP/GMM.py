@@ -6,7 +6,7 @@ Gaussian Mixture Model functionalities. Adaptation of the GaussianMixture presen
 
 # Standard imports
 
-import os, time, copy, math
+import copy, math
 import importlib.util
 
 import numpy as np
@@ -24,9 +24,9 @@ if use_keops:
 else:
     print("Warning: pykeops not installed. Consider installing it, if you are on linux")
 
-from diffICP.spec import defspec, getspec
-from diffICP.visu import get_bounds, my_scatter
-from diffICP.registrations import Registration
+from diffICP.tools.spec import defspec
+from diffICP.visualization.visu import get_bounds, my_scatter
+
 
 #####################################################################################
 #####################################################################################
@@ -496,7 +496,7 @@ if __name__ == '__main__':
         bounds = (-0.5,1.5,-0.5,1.5)
 
         ### Load existing diffeomorphic registration (simpler)
-        from diffICP.spec import CPU_Unpickler
+        from diffICP.tools.spec import CPU_Unpickler
         loadfile = "saving/test_basic.pkl"
         with open(loadfile, 'rb') as f:
             yo = CPU_Unpickler(f).load()        # modified dill Unpickler (see diffPSR.spec.CPU_Unpickler)
@@ -505,7 +505,7 @@ if __name__ == '__main__':
         reg.a0 *= amplif
 
         ### Also apply registration to a grid, for visualization
-        from diffICP.grid import Gridlines
+        from diffICP.visualization.grid import Gridlines
         bounds = (-0.5,1.5,-0.5,1.5)
         gridlines = Gridlines(np.linspace(*bounds[:2],30), np.linspace(*bounds[2:],30))
         reglines = gridlines.register(reg, backward=True)

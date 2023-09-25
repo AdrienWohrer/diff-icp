@@ -2,8 +2,8 @@
 Compare different algorithms for classic ("two set") ICP or diffICP
 '''
 
-import os
-import time
+import os, time
+import pickle
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
@@ -12,9 +12,6 @@ from matplotlib.ticker import FormatStrFormatter
 plt.ion()
 
 import torch
-
-from pykeops.torch import Vi, Vj, LazyTensor, Pm
-import pykeops
 
 #pykeops.clean_pykeops()
 
@@ -29,14 +26,13 @@ from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
-from diffICP.visu import my_scatter, get_bounds, on_top
-from diffICP.spec import defspec, getspec
-from diffICP.grid import Gridlines
+from diffICP.visualization.visu import my_scatter, get_bounds, on_top
+from diffICP.tools.spec import defspec
+from diffICP.visualization.grid import Gridlines
 
 ###################################################################
-# Saving simulation results (with dill, a generalization of pickle)
+# Saving simulation results
 savestuff = False
-import dill
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
@@ -68,9 +64,10 @@ if not use_diffPSR:
     AffMi = AffineModel(D=2, version = 'euclidian', withlogdet=False)
 else:
     ### Diffeomorphic registration model (new diffICP algorithm)
-    LMi = LDDMMModel(D=2, sigma = 0.2,              # sigma of the Gaussian kernel
-                     lambd= 2e2,           # lambda of the LDDMM regularization
-                     version = "logdet")  # "logdet", "classic" or "hybrid"
+    LMi = LDDMMModel(D=2, sigma = 0.2,          # sigma of the Gaussian kernel
+                     lambd= 2e2,                # lambda of the LDDMM regularization
+                     computversion="torch",
+                     version = "logdet")        # "logdet", "classic" or "hybrid"
     # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
     Rdecim = 0.7
 
@@ -196,15 +193,15 @@ for it in range(nIter):
             plt.savefig(f"{savefigs_name}_{it}_b.{savefigs_format}", format=savefigs_format, bbox_inches='tight')
 
 # Done.
+print(f"Elapsed time : {time.time()-start} seconds")
 
-print(time.time()-start)
 savelist.extend(("PSR","param_evol"))
 
 if savestuff:
     print("Saving stuff")
     tosave = {k:globals()[k] for k in savelist}
     with open(savefile, 'wb') as f:
-        dill.dump(tosave, f)
+        pickle.dump(tosave, f)
         
 # Fini ! Wait for click
 print("Done.")

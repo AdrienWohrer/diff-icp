@@ -2,12 +2,10 @@
 Build and visualize a 2d grid, and possibly deform it through a Registration model
 '''
 
-import os, time, math
-
 import numpy as np
 from matplotlib import pyplot as plt
 import torch
-from diffICP.spec import defspec
+from diffICP.tools.spec import defspec
 from diffICP.registrations import Registration
 
 class Gridlines:
@@ -135,12 +133,15 @@ if __name__ == '__main__':
 
     ### Transform grid by a diffeomorphism (create one, or simply load one, as here)
 
-    from diffICP.spec import CPU_Unpickler
+    from diffICP.tools.spec import CPU_Unpickler
     loadfile = "saving/test_basic.pkl"
     with open(loadfile, 'rb') as f:
         yo = CPU_Unpickler(f).load()        # modified dill Unpickler (see diffPSR.spec.CPU_Unpickler)
     reg = yo["PSR"].Registration()
-    amplif = 2                              # modify strength of a0 (for testing)
+    if yo["PSR"].LMi.scheme == "Euler":
+        # Wise to change if necessary ! (Euler is much less stable)
+        yo["PSR"].LMi.set_integration_scheme("Ralston")
+    amplif = 1.5                              # modify strength of a0 (for testing)
     reg.a0 *= amplif
     reglines = gridlines.register(reg, backward=backward)
 
@@ -155,6 +156,7 @@ if __name__ == '__main__':
     fig = plt.figure()
     shootgrids, intersecs, speeds = gridlines.shoot(reg, require_v=True, backward=backward)
     for t,grid in enumerate(shootgrids):
+        plt.clf()
         grid.plot(color='blue', linewidth=1)
         if with_arrows:
             plt.quiver(intersecs[t][:,0], intersecs[t][:,1], speeds[t][:,0], speeds[t][:,1], scale=amplif/1.3, color='red', width=0.005)
@@ -166,6 +168,5 @@ if __name__ == '__main__':
         if savefigs:
             plt.savefig(f"figs/{savename}_{t}.{format}", format=format, bbox_inches='tight')
         plt.pause(.1)
-        plt.clf()
 
     input()

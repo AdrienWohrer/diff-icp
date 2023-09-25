@@ -2,7 +2,7 @@
 Function implementing the "general" version of diffICP algorithm (and also the classic, affine version)
 '''
 
-import os, time, math, copy
+import copy
 import warnings
 
 import numpy as np
@@ -18,8 +18,8 @@ from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
 from diffICP.Affine_logdet import AffineModel
 from diffICP.registrations import LDDMMRegistration, AffineRegistration
-from diffICP.decimate import decimate
-from diffICP.spec import defspec, getspec
+from diffICP.tools.decimate import decimate
+from diffICP.tools.spec import defspec
 
 
 #######################################################################
@@ -40,7 +40,6 @@ from diffICP.spec import defspec, getspec
 class multiPSR:
 
     ###################################################################
-
 
     def __init__(self, x, GMMi: GaussianMixtureUnif, dataspec=defspec, compspec=defspec):
         '''
@@ -323,8 +322,8 @@ class diffPSR(multiPSR):
         super().__init__(x, GMMi, dataspec=dataspec, compspec=compspec)
 
         # LDDMM Hamitonian system for inference. Also has a "spec" attribute, although almost useless (see kernel.py)
-        if LMi.spec != compspec:
-            raise ValueError("Spec (dtype+device) error : LDDMMmodel 'spec' and diffPSR 'compspec' attributes should be the same")
+        if LMi.Kernel.spec != compspec:
+            raise ValueError("Spec (dtype+device) error : LDDMMmodel kernel 'spec' and diffPSR 'compspec' attributes should be the same")
         self.LMi = LMi
 
         ### Segregate between support and non-support points for LDDMM shooting (if Rdecim is defined)

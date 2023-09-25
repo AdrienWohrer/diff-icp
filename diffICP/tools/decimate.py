@@ -1,27 +1,23 @@
-'''
-Implement greedy spherical decimation proposed in Granger et al, 2002
-TODO!
-'''
-
-import os, time, math
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from diffICP.visu import my_scatter
+from diffICP.visualization.visu import my_scatter
 
 use_cuda = torch.cuda.is_available()
 dtype = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
 
-# Greedy decimation of point set x with radius R
-# A subset y of point set x is computed, such that every point in x is at distance <= R to some point in y
-# - x = pytorch tensor of size (N,D)
-# - R = radius of the decimation
-# return :
-# - kept = indices of points in x to be kept in the decimated set
-# - rejected = indices of points in x NOT kept in the decimated set (just for convenience)
-
 def decimate(x,R):
+    '''
+     Greedy decimation of point set x with radius R.
+     A subset y of point set x is computed, such that every point in x is at distance <= R to some point in y.
+
+    :param x: pytorch tensor of size (N,D)
+    :param R: radius of the decimation
+    :return: (kept, rejected).
+    kept = indices of points in x to be kept in the decimated set ;
+    rejected = indices of points in x NOT kept in the decimated set (just for convenience)
+    '''
 
     x_i = x[:, None, :]  # (N, 1, 2)
     x_j = x[None, :, :]  # (1, N, 2)
@@ -50,7 +46,7 @@ if __name__ == '__main__':
 
     x = torch.randn(100,2)
     R = 0.5
-    kept = decimate(x,R)
+    kept, rejected = decimate(x,R)
     print(kept)
     my_scatter(x,color='b')
     my_scatter(x[kept,:],color='r')

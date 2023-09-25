@@ -2,17 +2,13 @@
 Basic example : LDDMM registration of a point set to a fixed GMM model
 '''
 
-import os
 import time
+import pickle
+
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
 plt.ion()
-
-import torch
-
-from pykeops.torch import Vi, Vj, LazyTensor, Pm
-import pykeops
 
 #pykeops.clean_pykeops()
 
@@ -23,18 +19,15 @@ import pykeops
 ###################################################################
 # Import from diffICP module
 
-from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.Affine_logdet import AffineModel
 from diffICP.PSR import diffPSR, affinePSR
-from diffICP.visu import my_scatter
-from diffICP.spec import defspec, getspec
+from diffICP.visualization.visu import my_scatter
+from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
 
 
 ###################################################################
-# Saving simulation results (with dill, a generalization of pickle)
-savestuff = False
-import dill
+# Saving simulation results
+savestuff = True
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
@@ -42,7 +35,7 @@ savefile = "saving/test_basic.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
-plotstuff = True
+plotstuff = False
 
 # Number of global loop iterations
 nIter = 20
@@ -52,60 +45,40 @@ sigma_opt = True
 sigma_start = 0.1   # starting sigma for GMMi (if sigma_opt=True) or FIXED value for GMMi (if sigma_opt=False)
                     # set at None to use the exact value from generating model GMMg
 
-###################################################################
-### Part 1 : Synthetic data generation
-###################################################################
-
 
 ###################################################################
-### "Ground truth" GMM model
-
-# Simpler and more reproducible : use the spiral formula to draw (deterministic) centroids for GMMg
-C = 20
-t = torch.linspace(0, 2 * np.pi, C + 1)[:-1]
-mu0 = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
-
-GMMg = GaussianMixtureUnif(mu0)
-GMMg.sigma = 0.025                                          # ad hoc
-GMMg.to_optimize = {'mu':False, 'sigma':False, 'w':False}   # fixed parameters
-
-if plotstuff:
-    plt.figure()
-    print(GMMg)
-    GMMg.plot()
-
+### Part 1 : Synthetic data : 'spiral' GMM + sample point set
 ###################################################################
-### "Ground truth" generative LDDMM model
 
-LMg = LDDMMModel(sigma = 0.2,   # sigma of the Gaussian kernel
-                 D=2,           # dimension of space
-                 lambd= 1e2,    # 1e2 lambda of the LDDMM regularization
-                 version = "classic",
-                 nt = 10)       # time discretization of interval [0,1] for ODE resolution
+reload = True
+if reload:
+    loadfile = "saving/sample_spiral_points_1.pkl"
+    print("Loading data points from existing file : ",loadfile)
+    with open(loadfile, 'rb') as f:
+        yo = pickle.load(f)
+    for key in ["GMMg","LMg","x0"]:
+        globals()[key] = yo[key]
+    x0 = x0[0]          # single point set (here id=0 -- can also test other sets from 0 to 9)
+    N = x0.shape[0]     # number of points
 
-###################################################################
-### Generate samples
+else:
+    N = 100
+    x0, GMMg, LMg = generate_spiral_point_sets(K=1, Nkbounds=(N,N+1),
+                                               sigma_GMM=0.025,
+                                               sigma_LDDMM=0.1, lambda_LDDMM=1e2)
+    x0 = x0[0]
 
-N = 100
-x0g = GMMg.get_sample(N)            # basic GMM sample
-# Random deformation moments (from LDDMM model LMg)
-a0g = LMg.random_p(x0g,
-##        version="svd", rcond=1/LMg.lam)       #  (Value of rcond is ad hoc)
-        version="ridge", alpha=10)              # (Value of alpha is ad hoc)
+GMMg.to_optimize = {'mu':False, 'sigma':sigma_opt, 'w':False}   # fixed parameters
 
-shoot = LMg.Shoot(x0g, a0g)             # shooting !
-x0 = shoot[-1][0]                       # arrival (deformed) points
-
-### Variables that will be saved (also add a0g and x0g for illustration!)
-savelist.extend(("GMMg","LMg","N","x0g","a0g","x0"))
-
+### Variables that will be saved
+savelist.extend(("GMMg","LMg","N","x0"))
 
 ###################################################################
 ### Check
 
 if plotstuff:
     plt.figure()
-    GMMg.plot(x0g,x0)
+    GMMg.plot(x0)
     my_scatter(x0)
 #    plot_shoot(shoot,color='b')
     plt.pause(1)
@@ -117,14 +90,16 @@ if plotstuff:
 
 ### Point Set Registration model : diffeomorphic version
 
-LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
-                          D=2,                  # dimension of space
-                          lambd= 5e2,           # lambda of the LDDMM regularization
-                          version = "logdet")   # "logdet", "classic" or "hybrid"
+LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian kernel
+                          D=2,                          # dimension of space
+                          lambd= 5e2,                   # lambda of the LDDMM regularization
+                          version = "classic",          # "logdet", "classic" or "hybrid"
+                          computversion="keops",        # "torch" or "keops"
+                          scheme="Euler")               # "Euler" or "Ralston"
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
+# PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.2, Rcoverwarning=1)
-# PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
+PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
 
 ### Point Set Registration model : affine version
 
@@ -134,8 +109,6 @@ PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
 # To change sigma also and optimize it (as in classic 2-point set probablistic ICP)
 if sigma_start is not None:
     PSR.GMMi[0].sigma = sigma_start     # (else, keep true value from GMMg)
-if sigma_opt:
-    PSR.GMMi[0].to_optimize["sigma"] = True
 
 # for storing parameter evolution in time
 param_evol = []
@@ -190,15 +163,15 @@ for it in range(nIter):
 
 # Done.
 
-print(time.time()-start)
+print(f"Elapsed time : {time.time()-start} seconds")
 savelist.extend(("PSR","param_evol"))
 
 if savestuff:
     print("Saving stuff")
     tosave = {k:globals()[k] for k in savelist}
     with open(savefile, 'wb') as f:
-        dill.dump(tosave, f)
-        
+        pickle.dump(tosave, f)
+
 # Fini ! Wait for click
 if plotstuff:
     print("Done.")

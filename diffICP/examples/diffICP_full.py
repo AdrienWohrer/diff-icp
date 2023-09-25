@@ -2,10 +2,8 @@
 Testing the full diffICP algorithm (multiple frames + multiple structures)
 '''
 
-import os, time, math
-
 import copy
-
+import pickle
 import numpy as np
 
 from matplotlib import pyplot as plt
@@ -21,16 +19,12 @@ torch.random.manual_seed(1234)
 
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.Affine_logdet import AffineModel
-from diffICP.PSR import diffPSR, affinePSR
-from diffICP.visu import my_scatter
-from diffICP.spec import defspec, getspec
-
+from diffICP.PSR import diffPSR
+from diffICP.visualization.visu import my_scatter
 
 ###################################################################
-# Saving simulation results (with dill, a generalization of pickle)
-savestuff = False
-import dill
+# Saving simulation results
+savestuff = True
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
@@ -42,13 +36,12 @@ savelist = []       # store names of variables to be saved
 plotstuff = True
 
 # Number of global loop iterations
-nIter = 30
+nIter = 1
 
 
 ###################################################################
 ### Part 1 : Synthetic data generation
 ###################################################################
-
 
 ###################################################################
 ### "Ground truth" generative GMM models
@@ -220,13 +213,13 @@ for it in range(nIter):
 
 # Done !
 
-savelist.extend(("LMi","mu0","GMMi_evol","a0_evol"))
+savelist.extend(("PSR","GMMi_evol","a0_evol"))
 
 if savestuff:
     print("Saving stuff")
     tosave = {k:globals()[k] for k in savelist}
     with open(savefile, 'wb') as f:
-        dill.dump(tosave, f)
+        pickle.dump(tosave, f)
         
 # Wait for click
 if plotstuff:

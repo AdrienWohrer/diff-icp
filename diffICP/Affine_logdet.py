@@ -2,15 +2,11 @@
 Class implementing the affine model of registration, including logdet term
 '''
 
-import os, time, math
-import copy
-import warnings
-
 import numpy as np
 import torch
 from scipy.linalg import expm,logm    # matrix exponential and logarithm (to compute affine shooting)
 
-from diffICP.spec import defspec, getspec
+from diffICP.tools.spec import defspec, getspec
 
 
 #####################################################################################################################

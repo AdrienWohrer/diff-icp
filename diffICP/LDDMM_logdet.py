@@ -9,43 +9,15 @@ LDDMM model for point sets (classic or with logdet term)
 
 # Standard imports
 
-import os, time, math
-import warnings
+import math
 
 import torch
 
 ### Import kernel reductions, from other file in this directory
-from diffICP.kernel import SVDpow, GaussKernel
-from diffICP.spec import defspec, getspec
-from diffICP.optim import LBFGS_optimization
-
-#####################################################################################################################
-### Custom ODE solver, for ODE systems which are defined on tuples
-#####################################################################################################################
-
-def RalstonIntegrator():
-    def f(ODESystem, x0, nt, deltat=1.0):
-        x = tuple(map(lambda x: x.clone(), x0))     # Nota : clone() transmits the computational graph
-        dt = deltat / nt
-        l = [x]
-        for i in range(nt):
-            # print("integration, step ",i)
-            xdot = ODESystem(*x)
-            xi = tuple(map(lambda x, xdot: x + (2 * dt / 3) * xdot, x, xdot))
-            xdoti = ODESystem(*xi)
-            x = tuple(
-                map(
-                    lambda x, xdot, xdoti: x + (0.25 * dt) * (xdot + 3 * xdoti),
-                    x,
-                    xdot,
-                    xdoti,
-                )
-            )
-            l.append(x)
-        return l
-
-    return f
-
+from diffICP.tools.kernel import SVDpow, GaussKernel, GenKernel
+from diffICP.tools.spec import defspec, getspec
+from diffICP.tools.optim import LBFGS_optimization
+from diffICP.tools.integrators import EulerIntegrator, RalstonIntegrator
 
 #####################################################################################################################
 # Encapsulate all the "LDDMM logic" in a class
@@ -62,10 +34,9 @@ class LDDMMModel:
 
     def __init__(self, sigma=1, D=2, lambd=1,
                  spec=defspec, gradcomponent=True, withlogdet=True, version=None,
-                 usetrajcost=True, computversion="keops", nonsupprev=False, nt=10):
+                 usetrajcost=True, computversion="keops", scheme="Ralston", nonsupprev=False, nt=10):
 
         # Gaussian kernel: only choice so far
-        self.spec = spec
         self.Kernel = GaussKernel(sigma, D, computversion=computversion, spec=spec)     # (variable spec is only used here, to transfer to the kernel)
         self.D = D
         self.lam = lambd
@@ -90,16 +61,30 @@ class LDDMMModel:
         self.usetrajcost = usetrajcost
         # Computational detail : use reversed reductions for non-support points (x). A priori, not interesting (slower) but kept for testing on larger datasets
         self.nonsupprev = nonsupprev
-        # Ralston integrator : only choice so far
-        self.Integrator = RalstonIntegrator()
+        # Which integration scheme ?
+        self.scheme, self.Integrator = None, None
+        self.set_integration_scheme(scheme)
+
+
+    def set_integration_scheme(self, scheme: str):
+        '''
+        Set integration scheme for underlying ODE.
+        :param scheme: "Euler" or "Ralston" (only schemes implemented so far)
+        '''
+        self.scheme = scheme
+        if scheme == "Euler":   # faster but (much) less stable in case of large deformations !
+            self.Integrator = EulerIntegrator
+        elif scheme == "Ralston":
+            self.Integrator = RalstonIntegrator
+        else:
+            raise ValueError(f"Unkown numerical scheme : {scheme}")
 
 
     # "Post-creation" function when Unpickling with pickle/dill. See https://docs.python.org/3/library/pickle.html#handling-stateful-objects
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self.spec = defspec                        # use local spec (type/device) for torch tensors
-        self.Integrator = RalstonIntegrator()      # necessary to redefine because dill doesn't serialize function attributes well enough
-
+        # use local spec (type/device) for torch tensors
+        self.Kernel = GaussKernel(self.Kernel.sigma, self.Kernel.D, self.Kernel.computversion, spec=defspec)
 
     #####################################################################################################################
     # LDDMM Hamiltonian functions
@@ -239,8 +224,8 @@ class LDDMMModel:
         cost0 = torch.tensor([0.0], **spec)
         return self.Integrator(self.ODE, (q0, p0, cost0, x0), self.nt)
 
-    ### Fonction de dataloss "basique" des LDDMM (utilisée pour avoir une option par défaut)
-    # - yn sont les cibles des xn
+    ### "Basic" loss function for LDDMM landmarks (shown here, as an option by default)
+    # - each yn is the target of corresponding xn
 
     def QuadLoss(self, y, cmul=1):
         y = y.detach()      # (to be sure)

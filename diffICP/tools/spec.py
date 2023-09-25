@@ -52,9 +52,9 @@ def getspec(*T):
 #     contents = CPU_Unpickler(f).load()
 
 import io
-import dill      # (more powerful version of pickle)
+import pickle
 
-class CPU_Unpickler(dill.Unpickler):
+class CPU_Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if module == 'torch.storage' and name == '_load_from_bytes':
             return lambda b: torch.load(io.BytesIO(b), map_location='cpu')

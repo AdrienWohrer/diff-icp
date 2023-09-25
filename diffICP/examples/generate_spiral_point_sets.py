@@ -4,8 +4,7 @@ Generate some "spiral" point sets, using a "diffeomorphically-warped GMM" distri
 NOTA: the "spiral" shape formula comes from a KeOps tutorial
 '''
 
-import time, copy
-import dill             # like pickle, but more powerful
+import pickle
 import numpy as np
 from matplotlib import pyplot as plt
 plt.ion()
@@ -19,7 +18,7 @@ torch.random.manual_seed(1234)
 
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.visu import my_scatter
+from diffICP.visualization.visu import my_scatter
 
 ##########################################################################################"
 
@@ -91,7 +90,7 @@ if __name__ == '__main__':
         print("Saving stuff")
         tosave = {k:globals()[k] for k in savelist}
         with open(savefile, 'wb') as f:
-            dill.dump(tosave, f)
+            pickle.dump(tosave, f)
 
     plotstuff = True
     if plotstuff:

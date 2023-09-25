@@ -3,14 +3,10 @@ Testing the diffICP algorithm on multiple point set registration (statistical at
 '''
 
 import time, copy
-import numpy as np
-import dill
+import pickle
 from matplotlib import pyplot as plt
 plt.ion()
 import torch
-
-from pykeops.torch import Vi, Vj, LazyTensor, Pm
-import pykeops
 
 #pykeops.clean_pykeops()
 
@@ -22,14 +18,12 @@ torch.random.manual_seed(1234)
 
 from diffICP.GMM import GaussianMixtureUnif
 from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.Affine_logdet import AffineModel
-from diffICP.PSR import diffPSR, affinePSR
-from diffICP.visu import my_scatter
-from diffICP.spec import defspec, getspec
-from examples.generate_spiral_point_sets import generate_spiral_point_sets
+from diffICP.PSR import diffPSR
+from diffICP.visualization.visu import my_scatter
+from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
 
 ###################################################################
-# Saving simulation results (with dill, a generalization of pickle)
+# Saving simulation results
 
 savestuff = True
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
@@ -42,7 +36,7 @@ savelist = []       # store names of variables to be saved
 plotstuff = True
 
 # Number of global loop iterations
-nIter = 30
+nIter = 3
 
 ###################################################################
 ### Part 1 : Synthetic data : 'spiral' point sets
@@ -53,7 +47,7 @@ if reload:
     loadfile = "saving/sample_spiral_points_1.pkl"
     print("Loading data points from existing file : ",loadfile)
     with open(loadfile, 'rb') as f:
-        yo = dill.load(f)
+        yo = pickle.load(f)
     for key in ["GMMg","LMg","x0"]:
         globals()[key] = yo[key]
 
@@ -92,10 +86,12 @@ GMMi.to_optimize = {
 
 ### Point Set Registration model : diffeomorphic version
 
-LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
-                          D=2,                  # dimension of space
-                          lambd= 5e2,           # lambda of the LDDMM regularization
-                          version = "logdet")   # "logdet", "classic" or "hybrid"
+LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian kernel
+                          D=2,                          # dimension of space
+                          lambd= 5e2,                   # lambda of the LDDMM regularization
+                          version = "logdet",           # "logdet", "classic" or "hybrid"
+                          computversion="keops",        # "torch" or "keops"
+                          scheme="Euler")               # "Euler" or "Ralston"
 
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
 PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
@@ -148,7 +144,7 @@ for it in range(nIter):
         plt.pause(.1)
 
 # Done !
-print(time.time()-start)
+print(f"Elapsed time : {time.time()-start} seconds")
 
 savelist.extend(("PSR","GMMi_evol","a0_evol"))
 
@@ -156,7 +152,7 @@ if savestuff:
     print("Saving stuff")
     tosave = {k:globals()[k] for k in savelist}
     with open(savefile, 'wb') as f:
-        dill.dump(tosave, f)
+        pickle.dump(tosave, f)
         
 # Wait for click
 print('Done.')
