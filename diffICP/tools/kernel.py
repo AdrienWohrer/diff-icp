@@ -52,17 +52,24 @@ if False:
     exit()
 
 ###############################################################################################################
-# Base class "GenKernel" (virtual, as K_keops, K_torch and LapKRed are not implemented)
+# Base class "GenKernel" (virtual, as K_keops, K_torch and some other functions are not implemented)
 ###############################################################################################################
 
 class GenKernel:
+
+    ###############
+    ### Some "basic" torch and keops functions, used in the reductions below
 
     # USAGE : GK.K_torch(x,y)	    --> Pytorch tensor of size (M,N) with values K(x_i-y_j)
     def K_torch(self,x,y):
         raise NotImplementedError()
 
-    # USAGE : GK.LapK_torch(x_,y_)    --> Pytorch tensor of size (M,N) with values -Delta K)(x_i-y_j)
-    def LapK_torch(self, x_, y_):
+    # USAGE : GK.GradK_torch(x,y)	    --> Pytorch tensor of size (M,N) with values (\nabla K)(x_i-y_j)
+    def GradK_torch(self, x, y):
+        raise NotImplementedError()
+
+    # USAGE : GK.LapK_torch(x,y)    --> Pytorch tensor of size (M,N) with values -(Delta K)(x_i-y_j)
+    def LapK_torch(self, x, y):
         raise NotImplementedError()
 
     if use_keops:
@@ -78,8 +85,17 @@ class GenKernel:
         def LapK_keops(self, x_, y_):
             raise NotImplementedError()
 
+    ###############
+    ### Constructor
 
-    def __init__(self, D):
+    # (computversion argument leaves us the possibility to use "torch" computations even when keops is available)
+
+    def __init__(self, D, computversion="keops"):
+
+        self.computversion = None
+        self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed,\
+            self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
+            = None,None,None,None,None,None,None,None,None,None
 
         ########
         ### Various generic KeOps-based reductions
@@ -91,6 +107,10 @@ class GenKernel:
 
             # USAGE : GK.KBase(x,y)    --> PyTorch tensor of size (M,)    --> X(i) = \sum_j K(x_i-y_j)
             self.KBase_keops = K.sum_reduction(axis=1)
+
+            # USAGE : GK.KRedScal(x,y,d)    --> PyTorch tensor of size (M,)    --> X(i) = \sum_j K(x_i-y_j)d_j
+            d = Vj(2, 1)
+            self.KRedScal_keops = (K * d).sum_reduction(axis=1)
 
             # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
             self.KRed_keops = (K * b).sum_reduction(axis=1)
@@ -125,6 +145,52 @@ class GenKernel:
             # USAGE : GK.GradLapKRed(x,y)    --> PyTorch tensor of size (M,D)   --> X(i,d) = \sum_j (\partial_d \Delta K)(x_i-y_j)
             self.GradLapKRed_keops = self.LapK_keops(x,y).grad(x,1).sum_reduction(axis=1)
 
+        self.set_computversion(computversion)
+
+
+    #########################
+    ### PyTorch versions of the Reductions
+
+    # USAGE : GK.KBase(x,y)    --> PyTorch tensor of size (M,)    --> X(i) = \sum_j K(x_i-y_j)
+    def KBase_torch(self, x, y):
+        return torch.sum(self.K_torch(x,y), 1)
+
+    # USAGE : GK.KRedScal(x,y,d)    --> PyTorch tensor of size (M,)    --> X(i) = \sum_j K(x_i-y_j)d_j
+    def KRedScal_torch(self, x, y, d):
+        return torch.sum(self.K_torch(x, y) * d[None, :], 1)
+
+    # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
+    def KRed_torch(self, x, y, b):
+        return torch.sum(self.K_torch(x,y)[:, :, None] * b[None,:, :], 1)
+
+    # USAGE : GK.GradKRed(x,y)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)
+    def GradKRed_torch(self, x, y):
+        return torch.sum(self.GradK_torch(x,y), 1)
+
+    # USAGE : GK.GradKRed_rev(x,y,d)    --> PyTorch tensor of size (N,1)  --> Y(i) = \sum_i\sum_d (\partial_d K)(x_i-y_j)d_i^d
+    def GradKRed_rev_torch(self, x, y, d):
+        return torch.sum( (self.GradK_torch(x,y) * d[:,None,:]).sum(-1), 0)
+
+    # USAGE : GK.DDKRed(x,y,b)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)b_j^d
+    def DDKRed_torch(self, x, y, b):
+        return torch.sum(self.GradK_torch(x,y) * b[None, :, :], 1)
+
+    # USAGE : GK.GenDKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)(c_i^t b_j)
+    def GenDKRed_torch(self,x,y,b,c):
+        return torch.sum( self.GradK_torch(x,y) * (b[None,:,:]*c[:,None,:]).sum(-1)[:,:,None] ,1)
+
+    # USAGE : GK.LapKRed(x,y)    --> PyTorch tensor of size (M,1)   --> \sum_j (\Delta K)(x_i-y_j)
+    def LapKRed_torch(self, x, y):
+        return torch.sum(self.LapK_torch(x,y), 1)
+
+    # USAGE : GK.HessKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial^{(2)}_{de} K)(x_i-y_j)(c_i^e - b_j^e)
+    def HessKRed_torch(self,x,y,b,c):
+        raise NotImplementedError()     # should be implemented directly depending on the kernel
+
+    # USAGE : GK.GradLapKRed(x,y)    --> PyTorch tensor of size (M,D)   --> X(i,d) = \sum_j (\partial_d \Delta K)(x_i-y_j)
+    def GradLapKRed_torch(self, x, y):
+        raise NotImplementedError()     # should be implemented directly depending on the kernel
+
 
     #########
     ### Some methods to (pseudo-) solve the linear system based on K
@@ -152,6 +218,30 @@ class GenKernel:
             # KeOps one-liner, but problematic (very long when alpha is small / N is big). (TODO Not checked on Gpu)
             return self.K_keops(Vi(x), Vj(x)).solve(Vi(v), alpha=alpha)
 
+    ###############
+    ### Set computation version ('keops' or 'pytorch')
+
+    def set_computversion(self, version):
+
+        if version == "keops" and not use_keops:
+            warnings.warn(
+                "Asked for keops kernel, but keops is not available on this machine. Switching to torch kernel.")
+            version = "torch"
+        # Aliases for the reductions (keops or torch version) :
+        if version == 'keops':
+            # KeOps versions : work even for large datasets
+            self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
+                = self.KBase_keops, self.KRed_keops, self.KRedScal_keops, self.GradKRed_keops, self.DDKRed_keops, self.GenDKRed_keops, self.HessKRed_keops, \
+                self.LapKRed_keops, self.GradLapKRed_keops, self.GradKRed_rev_keops
+        elif version == "torch":
+            # PyTorch versions : faster on CPU + small datasets ; crash on large datasets
+            self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
+                = self.KBase_torch, self.KRed_torch, self.KRedScal_torch, self.GradKRed_torch, self.DDKRed_torch, self.GenDKRed_torch, \
+                self.HessKRed_torch, self.LapKRed_torch, self.GradLapKRed_torch, self.GradKRed_rev_torch
+        else:
+            raise ValueError(f"unkown computversion : {version}. Choices are 'keops' or 'torch'")
+        self.computversion = version
+
 
 ###############################################################################################################
 # Gaussian kernel (only kernel implemented so far)
@@ -166,10 +256,13 @@ class GenKernel:
 class GaussKernel(GenKernel):
 
     #######################
-    ### Actual kernel (and corresponding Laplacian kernel) formulas : torch versions
+    ### Actual kernel (and corresponding gradient + Laplacian kernel) formulas : torch versions
 
     def K_torch(self, x, y):
         return (-(x[:, None, :] - y[None, :, :]) ** 2 / (2 * self.sigma ** 2)).sum(-1).exp()
+
+    def GradK_torch(self, x, y):
+        return self.K_torch(x, y)[:,:,None] * (y[None,:,:]-x[:,None,:]) / self.sigma**2
 
     def LapK_torch(self, x, y):
         D2 = torch.sum((x[:,None,:] - y[None,:,:]) ** 2, -1)
@@ -186,46 +279,13 @@ class GaussKernel(GenKernel):
         def LapK_keops(self, x_, y_):
             return self.K_keops(x_,y_) * ( x_.sqdist(y_) / self.sigma_k ** 4 - self.D_k / self.sigma_k ** 2 )
 
-    #########################
-    ### PyTorch versions of the Reductions
-
-    # Pytorch tensor reprensenting (\nabla K)(x-y) (used in the pytorch reductions below)
-    def GradK_torch(self, x, y):
-        return self.K_torch(x, y)[:,:,None] * (y[None,:,:]-x[:,None,:]) / self.sigma**2
-
-    # USAGE : GK.KBase(x,y)    --> PyTorch tensor of size (M,)    --> X(i) = \sum_j K(x_i-y_j)
-    def KBase_torch(self, x, y):
-        return torch.sum(self.K_torch(x,y), 1)
-
-    # USAGE : GK.KRed(x,y,b)    --> PyTorch tensor of size (M,D)    --> X(i,d) = \sum_j K(x_i-y_j)b_j^d
-    def KRed_torch(self, x, y, b):
-        return torch.sum(self.K_torch(x,y)[:, :, None] * b[None,:, :], 1)
-
-    # USAGE : GK.GradKRed(x,y)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)
-    def GradKRed_torch(self, x, y):
-        return torch.sum(self.GradK_torch(x,y), 1)
-
-    # USAGE : GK.GradKRed_rev(x,y,d)    --> PyTorch tensor of size (N,1)  --> Y(i) = \sum_i\sum_d (\partial_d K)(x_i-y_j)d_i^d
-    def GradKRed_rev_torch(self, x, y, d):
-        return torch.sum( (self.GradK_torch(x,y) * d[:,None,:]).sum(-1), 0)
-
-    # USAGE : GK.DDKRed(x,y,b)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)b_j^d
-    def DDKRed_torch(self, x, y, b):
-        return torch.sum(self.GradK_torch(x,y) * b[None, :, :], 1)
-
-    # USAGE : GK.GenDKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial_d K)(x_i-y_j)(c_i^t b_j)
-    def GenDKRed_torch(self,x,y,b,c):
-        return torch.sum( self.GradK_torch(x,y) * (b[None,:,:]*c[:,None,:]).sum(-1)[:,:,None] ,1)
+    ### Some PyTorch reductions that remained to implement directly
 
     # USAGE : GK.HessKRed(x,y,b,c)    --> PyTorch tensor of size (M,D)  --> X(i,d) = \sum_j (\partial^{(2)}_{de} K)(x_i-y_j)(c_i^e - b_j^e)
     #               X(i,d) = \sum_j ( [(xi-yj)^T(ci-bj)](xi-yj)^d - sig**2.(ci-bj)^d ) K(xi-yj) /sig**4
     def HessKRed_torch(self,x,y,b,c):
         yo = ( (x[:,None,:]-y[None,:,:])*(c[:,None,:]-b[None,:,:]) ).sum(-1)[:,:,None] * (x[:,None,:]-y[None,:,:])
         return torch.sum( ( yo/self.sigma**4 - (c[:,None,:]-b[None,:,:])/self.sigma**2 )*self.K_torch(x,y)[:,:,None], 1)
-
-    # USAGE : GK.LapKRed(x,y)    --> PyTorch tensor of size (M,1)   --> \sum_j (\Delta K)(x_i-y_j)
-    def LapKRed_torch(self, x, y):
-        return torch.sum(self.LapK_torch(x,y), 1)
 
     # USAGE : GK.GradLapKRed(x,y)    --> PyTorch tensor of size (M,D)   --> X(i,d) = \sum_j (\partial_d \Delta K)(x_i-y_j)
     def GradLapKRed_torch(self, x, y):
@@ -252,30 +312,11 @@ class GaussKernel(GenKernel):
             self.sigma_k = Pm(torch.tensor(sigma, **spec))
             self.D_k = Pm(torch.tensor(D, **spec))
 
-        if computversion == "keops" and not use_keops:
-            warnings.warn("Asked for keops kernel, but keops is not available on this machine. Switching to torch kernel.")
-            computversion = "torch"
-
-        self.computversion = computversion
-
-        super().__init__(D)
+        super().__init__(D, computversion)
 
         # Normally unnecessary : hard-coded formula for gradient
         # self.GradKRed_keops = (-K * (x - y) / sigma ** 2).sum_reduction(axis=1)
 
-        # Aliases for the reductions (keops or torch version) :
-        if self.computversion == 'keops':
-            # KeOps versions : work even for large datasets
-            self.KBase, self.KRed, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
-                = self.KBase_keops, self.KRed_keops, self.GradKRed_keops, self.DDKRed_keops, self.GenDKRed_keops, self.HessKRed_keops, \
-                self.LapKRed_keops, self.GradLapKRed_keops, self.GradKRed_rev_keops
-        elif self.computversion == "torch":
-            # PyTorch versions : faster on CPU + small datasets ; crash on large datasets
-            self.KBase, self.KRed, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
-                = self.KBase_torch, self.KRed_torch, self.GradKRed_torch, self.DDKRed_torch, self.GenDKRed_torch, \
-                self.HessKRed_torch, self.LapKRed_torch, self.GradLapKRed_torch, self.GradKRed_rev_torch
-        else:
-            raise ValueError("unkown version")
 
     ###############
     ### Helper method : check which points X are "covered" by the kernels centered in Y, i.e., at a distance less than
@@ -346,6 +387,16 @@ if __name__ == '__main__':
         print((vt*GK.GradKRed_keops(xt, yt)).sum())  # version KeOps
         print(GK.GradKRed_rev_keops(xt, yt, vt).sum())  # version KeOps (reversed)
         print(GK.GradKRed_rev_torch(xt, yt, vt).sum())  # version pytorch (reversed)
+
+        ### Some more reductions
+
+        for version in ["torch","keops"]:
+            GK.set_computversion(version)
+            print(GK.KBase(xt,yt)[:5])
+
+        for version in ["torch", "keops"]:
+            GK.set_computversion(version)
+            print(GK.KRedScal(xt, yt, bt[:,0])[:5])
 
         exit()
 
