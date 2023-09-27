@@ -1,5 +1,5 @@
 '''
-Function implementing the "general" version of diffICP algorithm (and also the classic, affine version)
+Classes implementing the "general" version of diffICP algorithm (and also the classic, affine version)
 '''
 
 import copy
@@ -14,10 +14,10 @@ import torch
 #######################################################################
 # Import from other files in this directory :
 
-from diffICP.GMM import GaussianMixtureUnif
-from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.Affine_logdet import AffineModel
-from diffICP.registrations import LDDMMRegistration, AffineRegistration
+from diffICP.core.GMM import GaussianMixtureUnif
+from diffICP.core.LDDMM_logdet import LDDMMModel
+from diffICP.core.Affine_logdet import AffineModel
+from diffICP.core.registrations import LDDMMRegistration, AffineRegistration
 from diffICP.tools.decimate import decimate
 from diffICP.tools.spec import defspec
 
@@ -148,7 +148,7 @@ class multiPSR:
         # Store last shoot for each frame (for plotting, etc.)
         self.shoot = [None] * self.K
 
-    # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
+    # Hack to ensure a correct value of spec when Unpickling. See spec.CPU_Unpickler and
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
     def __setstate__(self, state):
         self.__dict__.update(state)
@@ -156,11 +156,35 @@ class multiPSR:
         self.compspec = defspec
 
 
+    ###################################################################
+    ### More user-friendly accessors to the point sets
+
+    def get_data_points(self, k=0, s=0):
+        '''
+        Data point set for frame (=patient) k and structure s
+        '''
+        return self.x0[k,s]
+
+    def get_warped_data_points(self, k=0, s=0):
+        '''
+        Warped data point set for frame (=patient) k and structure s
+        '''
+        return self.x1[k,s]
+
+    def get_template(self, s=0):
+        '''
+        Template (GMM model centroids) for structure s
+        '''
+        return self.GMMi[s].mu
+
+
     ################################################################
     ################################################################
 
     def update_quadloss(self, k, s):
-        '''Update quadratic error between point sets x1[k,s] (warped points) and y[k,s] (GMM target points)'''
+        '''
+        Update quadratic error between point sets x1[k,s] (warped points) and y[k,s] (GMM target points).
+        '''
 
         self.quadloss[k,s] = ((self.x1[k,s]-self.y[k,s])**2).sum() / (2 * self.GMMi[s].sigma ** 2)
 
@@ -229,7 +253,8 @@ class multiPSR:
     def Registration(self, k=0):
         '''
         Return a `registration` object for frame number k (k=0 by default, when there is a single frame).
-        `registration` objects are convenient interfaces to apply a registration to an external set of points. See registrations.py.
+        `registration` objects are convenient interfaces to apply a registration to an external set of points.
+        See registrations.py.
         '''
 
         if isinstance(self, diffPSR):
@@ -372,6 +397,7 @@ class diffPSR(multiPSR):
     def QuadLossFunctor(self, k):
         '''
         Partial optimization, LDDMM part (for frame k).
+        Nota: only works for an LDDMM Gaussian kernel.
 
         :return : the data loss function to use in LDDMM optimization for frame k. That is, (q,x) --> dataloss(q,x)
             with q all support points in frame k, and x all non-support points in frame k, concatenated across all structures s.

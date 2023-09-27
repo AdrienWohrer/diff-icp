@@ -19,8 +19,8 @@ plt.ion()
 ###################################################################
 # Import from diffICP module
 
-from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.PSR import diffPSR, affinePSR
+from diffICP.core.LDDMM_logdet import LDDMMModel
+from diffICP.core.PSR import diffPSR, affinePSR
 from diffICP.visualization.visu import my_scatter
 from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
 

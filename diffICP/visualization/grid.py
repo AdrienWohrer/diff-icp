@@ -6,7 +6,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 import torch
 from diffICP.tools.spec import defspec
-from diffICP.registrations import Registration
+from diffICP.core.registrations import Registration
 
 class Gridlines:
 

@@ -270,7 +270,7 @@ class LDDMMModel:
             return L
 
         # Optimize lossfunc w.r.t. p0 (LBFGS algorithm, now externalized to helper function)
-        p0, nsteps, change = LBFGS_optimization([p0], lossfunc, nmax=nmax, tol=tol, errthresh=errthresh)
+        p0, _, nsteps, change = LBFGS_optimization([p0], lossfunc, nmax=nmax, tol=tol, errthresh=errthresh)
         p0 = p0[0]
 
         # TODO: various reset strategies when optimization failed

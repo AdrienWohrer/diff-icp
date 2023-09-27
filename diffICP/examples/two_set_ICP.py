@@ -22,10 +22,10 @@ import torch
 ###################################################################
 # Import from diffICP module
 
-from diffICP.GMM import GaussianMixtureUnif
-from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.Affine_logdet import AffineModel
-from diffICP.PSR import diffPSR, affinePSR
+from diffICP.core.GMM import GaussianMixtureUnif
+from diffICP.core.LDDMM_logdet import LDDMMModel
+from diffICP.core.Affine_logdet import AffineModel
+from diffICP.core.PSR import diffPSR, affinePSR
 from diffICP.visualization.visu import my_scatter, get_bounds, on_top
 from diffICP.tools.spec import defspec
 from diffICP.visualization.grid import Gridlines
@@ -80,7 +80,7 @@ savelist.extend(("basic_ICP","use_diffPSR","nIter"))
 
 import scipy.io
 chui_dataset = 1    # (1 to 5)
-yo = scipy.io.loadmat(f"examples/chui-data/demodata_ex{chui_dataset}.mat")
+yo = scipy.io.loadmat(f"diffICP/examples/chui-data/demodata_ex{chui_dataset}.mat")
 x_name = f'x{[1,2,3,1,1][chui_dataset-1]}'   # name of the variables in the chui file (no general rule :))
 y_name = f'y{[1,2,3,"2a","2a"][chui_dataset-1]}'   # name of the variables in the chui file (no general rule :))
 xA = torch.tensor(yo[x_name], **defspec).contiguous()   # xA will correspond to fixed GMM centroids

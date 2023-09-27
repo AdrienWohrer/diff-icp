@@ -6,16 +6,13 @@ and Affine_logdet.py (for affine registration)
 
 # Standard imports
 
-import os, time, math, copy
 import warnings
-import numpy as np
-from matplotlib import pyplot as plt
 import torch
 
 # Imports from diffICP module
 
-from diffICP.LDDMM_logdet import LDDMMModel
-from diffICP.Affine_logdet import AffineModel
+from diffICP.core.LDDMM_logdet import LDDMMModel
+from diffICP.core.Affine_logdet import AffineModel
 
 
 #################################################

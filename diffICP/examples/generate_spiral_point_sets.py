@@ -16,8 +16,8 @@ torch.random.manual_seed(1234)
 
 # Import from diffICP module
 
-from diffICP.GMM import GaussianMixtureUnif
-from diffICP.LDDMM_logdet import LDDMMModel
+from diffICP.core.GMM import GaussianMixtureUnif
+from diffICP.core.LDDMM_logdet import LDDMMModel
 from diffICP.visualization.visu import my_scatter
 
 ##########################################################################################"

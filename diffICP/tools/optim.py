@@ -1,12 +1,11 @@
 '''
-Overall gradient-based optimization procedure, used in different places of the module
-This is basically a wrapper for Pytorch's L-BFGS optimization procedure
+Overall gradient-based optimization procedure, used in different places of the module.
+This is basically a wrapper for Pytorch's L-BFGS optimization procedure.
 '''
 
 import os, time, math, copy
 import warnings
 import torch
-
 
 def LBFGS_optimization(p0, lossfunc, nmax=10, tol=1e-3, errthresh=1e8):
     '''
@@ -15,7 +14,7 @@ def LBFGS_optimization(p0, lossfunc, nmax=10, tol=1e-3, errthresh=1e8):
     :param p0: list [a0, b0, c0, ...] with a0, b0, ... = pytorch tensors = initial parameter values
     :param lossfunc: loss function, in the form L = lossfunc(a,b,c,...)
     :param nmax: maximum number of optimizer steps (pytorch L-BFGS optimizer)
-    :param tol: stopping tolerance on L
+    :param tol: stopping tolerance (on Delta L / L)
     :param errthresh: threshold on L for error reporting
     :return: p = [a,b,c,...] (optimal parameters found), nsteps (number of required optimizer steps), change (on loss function)
     '''
@@ -77,6 +76,7 @@ def LBFGS_optimization(p0, lossfunc, nmax=10, tol=1e-3, errthresh=1e8):
             if best_L < Lprev:
                 # Some better p0 value than p0prev has been encoutered during the optimizer step --> use it.
                 p = best_p
+                L = best_L
                 print(
                     "Exiting current L-BFGS optimization. Found an intermediate 'best_p' value to use instead.")
             else:
@@ -84,6 +84,7 @@ def LBFGS_optimization(p0, lossfunc, nmax=10, tol=1e-3, errthresh=1e8):
                 # TODO: strategy in this case should be fixed externally (by the calling function)
                 rmod = 0.01
                 p = [ a + rmod * a.std() * torch.randn(a.shape, dtype=a.dtype, device=a.device) for a in p ]
+                L = lossfunc(*p)
                 print(
                     f"Exiting current L-BFGS optimization. Trying a random perturbation of parameter from its current value, with relative strength {rmod}.")
 
@@ -92,9 +93,9 @@ def LBFGS_optimization(p0, lossfunc, nmax=10, tol=1e-3, errthresh=1e8):
 
         else:  # normal behavior
             change = ((torch.cat(tuple(p),dim=0) - torch.cat(tuple(p_prev),dim=0)) ** 2).mean().sqrt().detach().cpu().numpy()  # change in parameter value
-            keepOn = change > tol
+            keepOn = change > tol * (torch.cat(tuple(p_prev),dim=0) ** 2).mean().sqrt().detach().cpu().numpy()
 
     p = [ a.detach() for a in p ]
     nsteps = i
-    return p, nsteps, change
+    return p, L, nsteps, change
 
