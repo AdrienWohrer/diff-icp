@@ -86,9 +86,31 @@ class GenKernel:
             raise NotImplementedError()
 
     ###############
-    ### Constructor
+    ### Set computation version ('keops' or 'pytorch')
 
-    # (computversion argument leaves us the possibility to use "torch" computations even when keops is available)
+    def set_computversion(self, version):
+
+        if version == "keops" and not use_keops:
+            warnings.warn(
+                "Asked for keops kernel, but keops is not available on this machine. Switching to torch kernel.")
+            version = "torch"
+        # Aliases for the reductions (keops or torch version) :
+        if version == 'keops':
+            # KeOps versions : work even for large datasets
+            self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
+                = self.KBase_keops, self.KRed_keops, self.KRedScal_keops, self.GradKRed_keops, self.DDKRed_keops, self.GenDKRed_keops, self.HessKRed_keops, \
+                self.LapKRed_keops, self.GradLapKRed_keops, self.GradKRed_rev_keops
+        elif version == "torch":
+            # PyTorch versions : faster on CPU + small datasets ; crash on large datasets
+            self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
+                = self.KBase_torch, self.KRed_torch, self.KRedScal_torch, self.GradKRed_torch, self.DDKRed_torch, self.GenDKRed_torch, \
+                self.HessKRed_torch, self.LapKRed_torch, self.GradLapKRed_torch, self.GradKRed_rev_torch
+        else:
+            raise ValueError(f"unkown computversion : {version}. Choices are 'keops' or 'torch'")
+        self.computversion = version
+
+    ##############
+    ### Constructor
 
     def __init__(self, D, computversion="keops"):
 
@@ -145,6 +167,7 @@ class GenKernel:
             # USAGE : GK.GradLapKRed(x,y)    --> PyTorch tensor of size (M,D)   --> X(i,d) = \sum_j (\partial_d \Delta K)(x_i-y_j)
             self.GradLapKRed_keops = self.LapK_keops(x,y).grad(x,1).sum_reduction(axis=1)
 
+        # Finally, set computversion to 'keops' or 'torch'
         self.set_computversion(computversion)
 
 
@@ -218,29 +241,6 @@ class GenKernel:
             # KeOps one-liner, but problematic (very long when alpha is small / N is big). (TODO Not checked on Gpu)
             return self.K_keops(Vi(x), Vj(x)).solve(Vi(v), alpha=alpha)
 
-    ###############
-    ### Set computation version ('keops' or 'pytorch')
-
-    def set_computversion(self, version):
-
-        if version == "keops" and not use_keops:
-            warnings.warn(
-                "Asked for keops kernel, but keops is not available on this machine. Switching to torch kernel.")
-            version = "torch"
-        # Aliases for the reductions (keops or torch version) :
-        if version == 'keops':
-            # KeOps versions : work even for large datasets
-            self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
-                = self.KBase_keops, self.KRed_keops, self.KRedScal_keops, self.GradKRed_keops, self.DDKRed_keops, self.GenDKRed_keops, self.HessKRed_keops, \
-                self.LapKRed_keops, self.GradLapKRed_keops, self.GradKRed_rev_keops
-        elif version == "torch":
-            # PyTorch versions : faster on CPU + small datasets ; crash on large datasets
-            self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed, self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
-                = self.KBase_torch, self.KRed_torch, self.KRedScal_torch, self.GradKRed_torch, self.DDKRed_torch, self.GenDKRed_torch, \
-                self.HessKRed_torch, self.LapKRed_torch, self.GradLapKRed_torch, self.GradKRed_rev_torch
-        else:
-            raise ValueError(f"unkown computversion : {version}. Choices are 'keops' or 'torch'")
-        self.computversion = version
 
 
 ###############################################################################################################
