@@ -35,7 +35,7 @@ savefile = "saving/test_basic.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
-plotstuff = False
+plotstuff = True
 
 # Number of global loop iterations
 nIter = 20
@@ -102,7 +102,8 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
 # New version !
 PSR = diffPSR(x0, GMMg, LMi)
 # Add a decimation scheme ?
-PSR.set_support_scheme("decim", rho=0.7)
+PSR.set_support_scheme("grid", rho=np.sqrt(2))
+# PSR.set_support_scheme("decim", rho=0.7)
 
 ### Point Set Registration model : affine version
 
@@ -153,7 +154,9 @@ for it in range(nIter):
         my_scatter(PSR.GMMi[0].mu, alpha=.6, color="b")
         my_scatter(x1, alpha=.6, color="r")
         PSR.plot_trajectories(color='red')
-        PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
+        if isinstance(PSR,diffPSR) and PSR.support_scheme:
+            # also visualize support trajectories in brown
+            PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)
         #plt.show()
         plt.xticks(np.arange(-0.5, 1.5 + 0.1, 0.5))
         plt.yticks(np.arange(-0.5, 1.5 + 0.1, 0.5))

@@ -20,7 +20,7 @@ from diffICP.core.Affine_logdet import AffineModel
 from diffICP.core.registrations import LDDMMRegistration, AffineRegistration
 from diffICP.tools.decimate import decimate
 from diffICP.tools.spec import defspec
-
+from diffICP.visualization.visu import get_bounds       # (recycled for grid bounds computation)
 
 #######################################################################
 ###
@@ -270,7 +270,7 @@ class multiPSR:
         '''
         Visualization of trajectories for the point sets in the registration process.
         :param k: frame to represent (k=0 by default, when there is a single frame).
-        :param support: only used in class diffPSR. If true, visualize trajectories of support points only.
+        :param support: only used in class diffPSR. If true, visualize trajectories of support points.
         :param shoot: custom "shoot" variable containing the trajectories (can be used to visualize trajectories for an "external" set of points).
         :param kwargs: plotting arguments passed to pyplot.plot
         '''
@@ -286,15 +286,18 @@ class multiPSR:
 
         if shoot is None:  # must recompute
             if isinstance(self, diffPSR):
-                shoot = self.LMi.Shoot(self.q0[k], self.a0[k], self.allx0[k])   # TODO: a bit dubious when self.q0[k] = self.allx0[k] !?
+                if self.support_scheme:
+                    shoot = self.LMi.Shoot(self.q0[k], self.a0[k], self.allx0[k])
+                else:
+                    shoot = self.LMi.Shoot(self.q0[k], self.a0[k])
             else:
                 X = torch.cat(tuple(self.x0[k, :]), dim=0).to(**self.compspec)
                 shoot = self.AffMi.Shoot(self.M[k], self.t[k], X)
 
-        if isinstance(self,diffPSR) and not support:
-            x = [tup[3] for tup in shoot]   # support and non support
+        if isinstance(self,diffPSR) and self.support_scheme and not support:
+            x = [tup[3] for tup in shoot]   # plot "non-support" points of the shooting
         else:
-            x = [tup[0] for tup in shoot]
+            x = [tup[0] for tup in shoot]   # in every other case
 
         for n in range(x[0].shape[0]):
             xnt = np.array([xt[n, :].cpu().tolist() for xt in x])
@@ -348,7 +351,7 @@ class diffPSR(multiPSR):
             self.allx0[k] = torch.cat(tuple(self.x0[k,:]), dim=0).to(**self.compspec).contiguous()
 
         # Initial LDDMM support points q0[k] : by defaut, all points x0 in frame k
-        # NOTA : This behavior can be overriden by using function self.set_support_scheme() below
+        # NOTA : This behavior can be overridden by using function self.set_support_scheme() below
         self.support_scheme = None
         self.q0 = self.allx0
 
@@ -390,14 +393,13 @@ class diffPSR(multiPSR):
         :param xticks: list or 1d array. If provided, imposes the X coordinates of the support grid (overriding "rho" parameter).
         :param yticks: list or 1d array. If provided, imposes the Y coordinates of the support grid (overriding "rho" parameter).
         '''
-        # TODO !!!*
 
         Rcover = rho * self.LMi.Kernel.sigma
-        self.q0 = [None] * self.K
 
         if scheme == "decim":
             # supp_ids[k,s] = ids of support points in original point set x[k,s]
             supp_ids = np.array([[None] * self.S] * self.K, dtype=object)
+            self.q0 = [None] * self.K
             for k in range(self.K):
                 for s in range(self.S):
                     supp_ids[k,s],_ = decimate(self.x0[k,s], Rcover)
@@ -409,7 +411,16 @@ class diffPSR(multiPSR):
                 self.q0[k] = torch.cat(tuple(self.x0[k,s][supp_ids[k,s]] for s in range(self.S)), dim=0).to(**self.compspec).contiguous()
 
         elif scheme == "grid":
-                raise ValueError("Grid support points not implemented yet!")
+            if xticks is None or yticks is None:
+                xmin,xmax,ymin,ymax = get_bounds(*self.allx0, relmargin=0)
+            if xticks is None:
+                xticks = np.arange(xmin-Rcover/2, xmax+Rcover/2, Rcover)
+            if yticks is None:
+                yticks = np.arange(ymin-Rcover/2, ymax+Rcover/2, Rcover)
+            gridpoints = np.stack(np.meshgrid(xticks, yticks), axis=2)                          # grid points (shape (Nx,Ny,2))
+            gridpoints = torch.tensor(gridpoints.reshape((-1,2),order='F'), **self.compspec).contiguous() # convert to torch tensor (shape (Nx*Ny,2))
+            # Use same support points for all frames (can be useful to compare them)
+            self.q0 = [gridpoints] * self.K
 
         else:
             raise ValueError(f"Unknown value of support point scheme : {scheme}. Only values available are 'decim' and 'grid'.")

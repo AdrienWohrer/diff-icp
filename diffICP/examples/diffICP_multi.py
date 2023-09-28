@@ -4,6 +4,7 @@ Testing the diffICP algorithm on multiple point set registration (statistical at
 
 import time, copy
 import pickle
+import numpy as np
 from matplotlib import pyplot as plt
 plt.ion()
 import torch
@@ -25,7 +26,7 @@ from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_se
 ###################################################################
 # Saving simulation results
 
-savestuff = True
+savestuff = False
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
@@ -33,10 +34,10 @@ savefile = "saving/registration_multi_spiral_1.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
-plotstuff = True
+plotstuff = False
 
 # Number of global loop iterations
-nIter = 3
+nIter = 5
 
 ###################################################################
 ### Part 1 : Synthetic data : 'spiral' point sets
@@ -94,8 +95,11 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
                           scheme="Euler")               # "Euler" or "Ralston"
 
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
-# PSR = diffPSR(x0, GMMi, LMi, Rdecim=None)
+# PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
+PSR = diffPSR(x0, GMMi, LMi)
+# Add a decimation scheme ?
+PSR.set_support_scheme("decim", rho=0.7)
+# PSR.set_support_scheme("grid", rho=1.0)
 
 ### Point Set Registration model : affine version
 
