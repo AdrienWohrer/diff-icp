@@ -286,13 +286,13 @@ class multiPSR:
 
         if shoot is None:  # must recompute
             if isinstance(self, diffPSR):
-                shoot = self.LMi.Shoot(self.q0[k], self.a0[k], self.remx0[k])
+                shoot = self.LMi.Shoot(self.q0[k], self.a0[k], self.allx0[k])   # TODO: a bit dubious when self.q0[k] = self.allx0[k] !?
             else:
                 X = torch.cat(tuple(self.x0[k, :]), dim=0).to(**self.compspec)
                 shoot = self.AffMi.Shoot(self.M[k], self.t[k], X)
 
         if isinstance(self,diffPSR) and not support:
-            x = [torch.cat((tup[0],tup[3])) for tup in shoot]   # support and non support
+            x = [tup[3] for tup in shoot]   # support and non support
         else:
             x = [tup[0] for tup in shoot]
 
@@ -312,7 +312,7 @@ class diffPSR(multiPSR):
     multiPSR algorithm with diffeomorphic (LDDMM) registrations.
     '''
 
-    def __init__(self, x, GMMi: GaussianMixtureUnif, LMi: LDDMMModel, dataspec=defspec, compspec=defspec, Rdecim=None, Rcoverwarning=None):
+    def __init__(self, x, GMMi: GaussianMixtureUnif, LMi: LDDMMModel, dataspec=defspec, compspec=defspec):
         '''
         :param x: list of input point sets. Three possible formats:
             x = torch tensor of size (N, D) : single point set;
@@ -332,15 +332,6 @@ class diffPSR(multiPSR):
             These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
             but there are too many frames/point sets to store them all on the Gpu (use dataspec["device"]='cpu').
             Of course, ideally, everything should be kept on the same device to avoid copies between devices.
-
-        :param Rdecim: Possible decimation to derive LDDMM support points. A smaller support point set (larger Rdecim)
-            allows to accelerate the LDDMM optimization. (Note that the registration + GMM optimization still apply
-            to the full sets of points.)
-            We pick LDDMM support points out of the full point sets, through a greedy decimation algorithm, ensuring
-            that the support points cover the full point sets with a covering radius of Rdecim*LMi.Kernel.sigma
-
-        :param Rcoverwarning: A warning is issued if some non-support point ends up at a distance > Rcoverwarning*LMi.Kernel.sigma
-            from all support points, at any time during the shooting procedure (unlike Rdecim which only concerns time t=0).
         '''
 
         # Initialize common features of the algorithm (class multiPSR)
@@ -351,44 +342,81 @@ class diffPSR(multiPSR):
             raise ValueError("Spec (dtype+device) error : LDDMMmodel kernel 'spec' and diffPSR 'compspec' attributes should be the same")
         self.LMi = LMi
 
-        ### Segregate between support and non-support points for LDDMM shooting (if Rdecim is defined)
-        #   supp_ids[k,s,0] = ids of support points in original point set x[k,s]
-        #   supp_ids[k,s,1] = remaining ids (non-support points) in original point set x[k,s]
-        # Nota : if Rdecim = None, supp_ids[k,s,0] = range(N[k,s]) and supp_ids[k,s,1] = range(0)
-
-        self.Rdecim = Rdecim
-        self.supp_ids = np.array([[[None]*2]*self.S]*self.K, dtype=object)
-        if Rdecim is not None:
-            for k in range(self.K):
-                for s in range(self.S):
-                    self.supp_ids[k,s,0], self.supp_ids[k,s,1] = decimate(self.x0[k,s], Rdecim*LMi.Kernel.sigma)
-                # Report amount of decimation for each frame k (across all structures s)
-                Ndecim = [ sum([ len(self.supp_ids[k,s,u]) for s in range(self.S) ]) for u in range(2) ]
-                Pdecim = Ndecim[0] / (Ndecim[0]+Ndecim[1])
-                print(f"Decimation, frame {k} : {Ndecim[0]} support points ({Pdecim:.0%} of original sets)")
-        else:
-            for k in range(self.K):
-                for s in range(self.S):
-                    self.supp_ids[k,s,0], self.supp_ids[k,s,1] = range(self.N[k,s]), range(0)
-
-        self.Rcoverwarning = Rcoverwarning
-
-        # Initial values for support points vs non-support points in each frame k (concatenated across all structures s)
-        self.q0 = [None] * self.K
-        self.remx0 = [None] * self.K
+        # All x0 points in frame k
+        self.allx0 = [None] * self.K
         for k in range(self.K):
-            self.q0[k] = torch.cat(tuple( self.x0[k,s][self.supp_ids[k,s,0]] for s in range(self.S) ), dim=0
-                                   ).to(**self.compspec).contiguous()
-            self.remx0[k] = torch.cat(tuple( self.x0[k,s][self.supp_ids[k,s,1]] for s in range(self.S) ), dim=0
-                                      ).to(**self.compspec).contiguous()
+            self.allx0[k] = torch.cat(tuple(self.x0[k,:]), dim=0).to(**self.compspec).contiguous()
+
+        # Initial LDDMM support points q0[k] : by defaut, all points x0 in frame k
+        # NOTA : This behavior can be overriden by using function self.set_support_scheme() below
+        self.support_scheme = None
+        self.q0 = self.allx0
 
         # Initial LDDMM momenta a0[k] (nota: all structures s are concatenated in a0[k])
-        # Start with zero speeds (which is NOT a0=0 in the logdet model!)
-        self.a0 = [None] * self.K
+        self.a0 = self.initialize_momenta()
+        # self.a0 = self.initialize_momenta(alpha=1e-3, version='ridge_keops')
+
+    ################################################################
+
+    def initialize_momenta(self, **v2p_args):
+        '''Return initial momenta a0 corresponding to zero speeds.
+        (Which is NOT a0=0 in the logdet model!)
+        '''
+        a0 = [None] * self.K
         for k in range(self.K):
             v0 = torch.zeros(self.q0[k].shape, **self.compspec)
-            self.a0[k] = self.LMi.v2p(self.q0[k], v0)
-            # self.a0[k] = self.LMi.v2p( self.q0[k], v0, alpha=1e-3, version='ridge_keops')
+            a0[k] = self.LMi.v2p(self.q0[k], v0, **v2p_args)
+        return a0
+
+    ################################################################
+    ### Fixing a smaller number of LDDMMM support points : use decimation, or a rectangular grid
+
+    def set_support_scheme(self, scheme="decim", rho=1.0, xticks=None, yticks=None):
+        '''
+        Define a specific set of support points for LDDMM shooting. A smaller support point set (larger rho)
+        allows to accelerate the LDDMM optimization. (Note that the registration + GMM optimization still apply
+        to the full sets of points.)
+
+        :param rho: Relative coverage radius. The actual coverage radius is defined as
+                Rcover = rho * LMi.Kernel.sigma
+
+        :param scheme: "decim" or "grid".
+            If "decim", we pick LDDMM support points out of the full point sets, through a greedy decimation algorithm,
+            ensuring that the support points cover the full point sets with a covering radius of Rcover =rho*sigma.
+            If "grid", we pick LDDMM support points on a grid, with bounds given by data, and grid step size given by Rcover = rho*sigma.
+            Alternatively, grid location can be set by hand, by providing lists xticks and yticks. (If provided, these
+            options override the value of "rho" parameter, which becomes useless.)
+
+        :param xticks: list or 1d array. If provided, imposes the X coordinates of the support grid (overriding "rho" parameter).
+        :param yticks: list or 1d array. If provided, imposes the Y coordinates of the support grid (overriding "rho" parameter).
+        '''
+        # TODO !!!*
+
+        Rcover = rho * self.LMi.Kernel.sigma
+        self.q0 = [None] * self.K
+
+        if scheme == "decim":
+            # supp_ids[k,s] = ids of support points in original point set x[k,s]
+            supp_ids = np.array([[None] * self.S] * self.K, dtype=object)
+            for k in range(self.K):
+                for s in range(self.S):
+                    supp_ids[k,s],_ = decimate(self.x0[k,s], Rcover)
+                # Report amount of decimation for each frame k (across all structures s)
+                Ndecim = sum([len(supp_ids[k,s]) for s in range(self.S)])
+                Pdecim = Ndecim / sum([self.N[k,s] for s in range(self.S)])
+                print(f"Decimation, frame {k} : {Ndecim} support points ({Pdecim:.0%} of original sets)")
+                # And thus
+                self.q0[k] = torch.cat(tuple(self.x0[k,s][supp_ids[k,s]] for s in range(self.S)), dim=0).to(**self.compspec).contiguous()
+
+        elif scheme == "grid":
+                raise ValueError("Grid support points not implemented yet!")
+
+        else:
+            raise ValueError(f"Unknown value of support point scheme : {scheme}. Only values available are 'decim' and 'grid'.")
+
+        self.support_scheme = scheme
+        # Don't forget to update a0 in consequence
+        self.a0 = self.initialize_momenta()
 
 
     ################################################################
@@ -400,22 +428,24 @@ class diffPSR(multiPSR):
         Nota: only works for an LDDMM Gaussian kernel.
 
         :return : the data loss function to use in LDDMM optimization for frame k. That is, (q,x) --> dataloss(q,x)
-            with q all support points in frame k, and x all non-support points in frame k, concatenated across all structures s.
+            with q all support points in frame k, and x all data points in frame k, concatenated across all structures s.
         '''
 
         # quadratic targets (make a contiguous copy to optimize keops reductions)
-        y_supp = torch.cat(tuple( self.y[k,s][self.supp_ids[k,s,0]] for s in range(self.S) ), dim=0
-                           ).to(**self.compspec).contiguous()
-        y_nonsupp = torch.cat(tuple( self.y[k,s][self.supp_ids[k,s,1]] for s in range(self.S) ), dim=0
-                              ).to(**self.compspec).contiguous()
-        # associated sigma values (ugly because depends on s)
-        sig2_supp = torch.cat(tuple( self.GMMi[s].sigma**2 * torch.ones(len(self.supp_ids[k,s,0])) for s in range(self.S) )
-                              ).to(**self.compspec).contiguous()
-        sig2_nonsupp = torch.cat(tuple( self.GMMi[s].sigma**2 * torch.ones(len(self.supp_ids[k,s,1])) for s in range(self.S) )
-                                 ).to(**self.compspec).contiguous()
+        y = torch.cat(tuple(self.y[k,:]), dim=0).to(**self.compspec).contiguous()
 
-        def dataloss_func(q,x):
-            return ( (q - y_supp)**2 / (2*sig2_supp[:,None]) ).sum() + ( (x - y_nonsupp)**2 / (2*sig2_nonsupp[:,None]) ).sum()
+        # associated sigma values (ugly because depends on s)
+        sig2 = torch.cat(tuple(self.GMMi[s].sigma**2 * torch.ones(self.N[k,s]) for s in range(self.S))).to(**self.compspec).contiguous()
+
+        if self.support_scheme is None:
+            # (default) dense scheme : support_points q = data_points x
+            def dataloss_func(q,x):
+                return ( (q - y)**2 / (2*sig2[:,None]) ).sum()
+
+        else:
+            # other support scheme : support_points q != data_points x
+            def dataloss_func(q,x):
+                return ( (x - y)**2 / (2*sig2[:,None]) ).sum()
 
         return dataloss_func
 
@@ -432,37 +462,46 @@ class diffPSR(multiPSR):
 
         for k in range(self.K):
             ### Optimize a0[k] (the long line!)
-            self.a0[k], self.shoot[k], self.regloss[k], datal, isteps, change = \
-                self.LMi.Optimize(self.QuadLossFunctor(k), self.q0[k], self.a0[k], self.remx0[k], tol=tol, nmax=nmax)
 
-            # re-assign to corresponding structures
-            qk, remxk = self.shoot[k][-1][0], self.shoot[k][-1][3]
-            allxk = [qk, remxk]
-            #testos = [self.q0[k],self.remx0[k]]
-            for u in range(2):
-                last = 0
-                for s in range(self.S):
-                    first, last = last, last + len(self.supp_ids[k,s,u])
-                    self.x1[k,s][self.supp_ids[k,s,u]] = allxk[u][first:last].to(**self.dataspec)
-                    # print(f"LDDMM check 1 : {(self.x0[k,s][self.supp_ids[k,s,u]]-testos[u][first:last]).norm()}")   # small_tests correct indexing
+            if self.support_scheme is None:
+                # (default) dense scheme : support_points q = data_points x
+                self.a0[k], self.shoot[k], self.regloss[k], datal, isteps, change = \
+                    self.LMi.Optimize(self.QuadLossFunctor(k), self.q0[k], self.a0[k], tol=tol, nmax=nmax)
+                # Recover warped data points
+                allx1k = self.shoot[k][-1][0]
+
+            else:
+                # other support scheme : support_points q != data_points x
+                self.a0[k], self.shoot[k], self.regloss[k], datal, isteps, change = \
+                    self.LMi.Optimize(self.QuadLossFunctor(k), self.q0[k], self.a0[k], self.allx0[k], tol=tol, nmax=nmax)
+                # Recover warped data points
+                allx1k = self.shoot[k][-1][3]
+
+            # Re-assign to corresponding structures
+            last = 0
+            for s in range(self.S):
+                first, last = last, last + self.N[k,s]
+                self.x1[k,s] = allx1k[first:last].to(**self.dataspec)
 
             # update quadratic losses
             for s in range(self.S):
                 self.update_quadloss(k,s)
 
-            # print("LDDMM check 2 : ", datal, " = ", self.quadloss[k,:].sum().item())  # small_tests that quadlosses are well computed and compatible
-
             # Report for this frame, print full free energy (to check that it only decreases!)
             self.update_FE(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change ={change:.4}.")
 
-            # Check whether all non-support points stayed covered by support points during the shooting
-            if self.Rcoverwarning is not None:
+            # Check whether all data points stayed covered by support points during the shooting.
+            # A warning is issued if some warped data points end up at a distance > Rcoverwarning*LMi.Kernel.sigma
+            # from all support points, at any time during the shooting procedure (unlike "rho" which only concerns time t=0).
+
+            if self.support_scheme is not None:
+                Rcoverwarning = 1                           # (hard-modify here if necessary)
                 for t in range(len(self.shoot[k])):
-                    qk, remxk = self.shoot[k][t][0], self.shoot[k][t][3]
-                    uncoveredxk = self.LMi.Kernel.check_coverage(remxk, qk, self.Rcoverwarning)
+                    qk, xk = self.shoot[k][t][0], self.shoot[k][t][3]
+                    uncoveredxk = self.LMi.Kernel.check_coverage(xk, qk, Rcoverwarning)
                     if uncoveredxk.any():
-                        print(f"WARNING : shooting, time step {t} : {uncoveredxk.sum()} uncovered points ({uncoveredxk.sum()/remxk.shape[0]:.2%})")
-                        warnings.warn("Uncovered points during LDDMM shooting. Check Rdecim and Rcoverwarning values.", RuntimeWarning)
+                        print(f"WARNING : shooting, time step {t} : {uncoveredxk.sum()} uncovered points ({uncoveredxk.sum()/xk.shape[0]:.2%})")
+                        warnings.warn("Uncovered points during LDDMM shooting. Choose a smaller rho when defining the support scheme.", RuntimeWarning)
 
 
 #######################################################################

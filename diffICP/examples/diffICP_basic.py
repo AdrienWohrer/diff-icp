@@ -27,7 +27,7 @@ from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_se
 
 ###################################################################
 # Saving simulation results
-savestuff = True
+savestuff = False
 # Nota: working directory is always assumed to be the Python project home (hence, no need for ../ to return to home directory)
 # When the IDE used is Pycharm, this requires to set the default run directory, as follows:
 # Main Menu > Run > Edit Configurations > Edit Configuration templates > Python > Working directory [-> select project home dir]
@@ -99,7 +99,10 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.2, Rcoverwarning=1)
-PSR = diffPSR(x0, GMMg, LMi, Rdecim=None)
+# New version !
+PSR = diffPSR(x0, GMMg, LMi)
+# Add a decimation scheme ?
+PSR.set_support_scheme("decim", rho=0.7)
 
 ### Point Set Registration model : affine version
 
@@ -150,7 +153,7 @@ for it in range(nIter):
         my_scatter(PSR.GMMi[0].mu, alpha=.6, color="b")
         my_scatter(x1, alpha=.6, color="r")
         PSR.plot_trajectories(color='red')
-        # PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
+        PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)     # only useful in diffPSR class
         #plt.show()
         plt.xticks(np.arange(-0.5, 1.5 + 0.1, 0.5))
         plt.yticks(np.arange(-0.5, 1.5 + 0.1, 0.5))
