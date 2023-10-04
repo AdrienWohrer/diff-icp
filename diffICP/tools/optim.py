@@ -92,8 +92,12 @@ def LBFGS_optimization(p0, lossfunc, nmax=10, tol=1e-3, errthresh=1e8):
             keepOn = False  # exit the iterations (optimization has failed)
 
         else:  # normal behavior
-            change = ((torch.cat(tuple(p),dim=0) - torch.cat(tuple(p_prev),dim=0)) ** 2).mean().sqrt().detach().cpu().numpy()  # change in parameter value
-            keepOn = change > tol * (torch.cat(tuple(p_prev),dim=0) ** 2).mean().sqrt().detach().cpu().numpy()
+            # changes in parameter value :
+            changes = [((a - a_prev) ** 2).mean().sqrt().detach().cpu().numpy() for a,a_prev in zip(p,p_prev)]
+            # reference values :
+            refs = [(a_prev ** 2).mean().sqrt().detach().cpu().numpy() for a_prev in p_prev]
+            keepOn = any( change > tol*ref for change,ref in zip(changes,refs) )
+            change = max(changes)
 
     p = [ a.detach() for a in p ]
     nsteps = i

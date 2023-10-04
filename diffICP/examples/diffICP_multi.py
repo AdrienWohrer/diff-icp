@@ -37,7 +37,7 @@ savelist = []       # store names of variables to be saved
 plotstuff = False
 
 # Number of global loop iterations
-nIter = 5
+nIter = 4
 
 ###################################################################
 ### Part 1 : Synthetic data : 'spiral' point sets
@@ -92,12 +92,12 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
                           lambd= 5e2,                   # lambda of the LDDMM regularization
                           version = "logdet",           # "logdet", "classic" or "hybrid"
                           computversion="keops",        # "torch" or "keops"
-                          scheme="Euler")               # "Euler" or "Ralston"
+                          scheme="Ralston")             # "Euler" or "Ralston"
 
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
 # PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
 PSR = diffPSR(x0, GMMi, LMi)
-# Add a decimation scheme ?
+# Add a support point scheme ?
 PSR.set_support_scheme("decim", rho=0.7)
 # PSR.set_support_scheme("grid", rho=1.0)
 
@@ -131,7 +131,7 @@ for it in range(nIter):
     PSR.GMM_opt(repeat=10)
 
     ### M step optimization for diffeomorphisms (individually for each k)
-    PSR.Reg_opt(tol=1e-5)
+    PSR.Reg_opt(tol=1e-5, nmax=1)
 
     ### Plot resulting point sets (and some trajectories)
 

@@ -66,10 +66,10 @@ else:
     ### Diffeomorphic registration model (new diffICP algorithm)
     LMi = LDDMMModel(D=2, sigma = 0.2,          # sigma of the Gaussian kernel
                      lambd= 2e2,                # lambda of the LDDMM regularization
-                     computversion="torch",
+                     computversion="keops",
                      version = "logdet")        # "logdet", "classic" or "hybrid"
-    # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-    Rdecim = 0.7
+    # Without support decimation (rho=None) or with support decimation (rho>0)
+    rho = 0.7
 
 savelist.extend(("basic_ICP","use_diffPSR","nIter"))
 
@@ -99,11 +99,13 @@ else:
     GMMi.sigma = sigma_start
     GMMi.to_optimize = {'mu':False, 'sigma':sigma_opt, 'w':False}
 
-### Registration model
+### And thus : full Point Set Registration algorithm
 if not use_diffPSR:
     PSR = affinePSR(xB, GMMi, AffMi)
 else:
-    PSR = diffPSR(xB, GMMi, LMi, Rdecim=Rdecim, Rcoverwarning=1)
+    PSR = diffPSR(xB, GMMi, LMi)
+    if rho is not None:
+        PSR.set_support_scheme("decim", rho)
 
 ### Plotting routine
 ####################
@@ -112,14 +114,14 @@ bounds = get_bounds(xA, xB, relmargin=0.1)
 
 def plot_step(only_data=False):
     plt.clf()
-    x1 = PSR.x1[0, 0]
+    x1 = PSR.get_warped_data_points()
     plot_complete = not only_data
     ### GMM Heatmap and contours
     if plot_complete and not basic_ICP:
         PSR.GMMi[0].plot(bounds=bounds, color="#A1C8C8", cmap="RdBu", heatmap_amplification=0.7)  # https://matplotlib.org/stable/gallery/color/colormap_reference.html
     ### Association between each point and its quadratic target
     if plot_complete and True:
-        assoc = torch.stack((PSR.x1[0,0],PSR.y[0,0]))
+        assoc = torch.stack((x1, PSR.y[0,0]))
         for n in range(x1.shape[0]):
             plt.plot(assoc[:,n,0], assoc[:,n,1], color="purple", linewidth=0.5)
     ### Grid lines

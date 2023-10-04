@@ -117,7 +117,7 @@ class GenKernel:
         self.computversion = None
         self.KBase, self.KRed, self.KRedScal, self.GradKRed, self.DDKRed,\
             self.GenDKRed, self.HessKRed, self.LapKRed, self.GradLapKRed, self.GradKRed_rev \
-            = None,None,None,None,None,None,None,None,None,None
+            = None, None, None, None, None, None, None, None, None, None
 
         ########
         ### Various generic KeOps-based reductions
@@ -240,8 +240,6 @@ class GenKernel:
         def KridgeSolve_keops(self, x, v, alpha=1e-4):
             # KeOps one-liner, but problematic (very long when alpha is small / N is big). (TODO Not checked on Gpu)
             return self.K_keops(Vi(x), Vj(x)).solve(Vi(v), alpha=alpha)
-
-
 
 ###############################################################################################################
 # Gaussian kernel (only kernel implemented so far)
@@ -393,6 +391,7 @@ if __name__ == '__main__':
         for version in ["torch","keops"]:
             GK.set_computversion(version)
             print(GK.KBase(xt,yt)[:5])
+            print(GK.KRedScal(xt,yt,torch.ones(N))[:5])
 
         for version in ["torch", "keops"]:
             GK.set_computversion(version)

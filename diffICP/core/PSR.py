@@ -232,7 +232,7 @@ class multiPSR:
         # nota: self.y is guaranteed to have no gradient attached (important for LDDMM QuadLoss below)
 
         # keep track of full free energy (to check that it only decreases!)
-        self.update_FE(message = f"EM optimisation ({repeat} repetition(s)).")
+        self.update_FE(message = f"GMM optimisation ({repeat} EM steps).")
 
 
     ################################################################
@@ -352,24 +352,36 @@ class diffPSR(multiPSR):
 
         # Initial LDDMM support points q0[k] : by defaut, all points x0 in frame k
         # NOTA : This behavior can be overridden by using function self.set_support_scheme() below
-        self.support_scheme = None
+        self.support_scheme, self.rho = None, None
         self.q0 = self.allx0
 
         # Initial LDDMM momenta a0[k] (nota: all structures s are concatenated in a0[k])
-        self.a0 = self.initialize_momenta()
-        # self.a0 = self.initialize_momenta(alpha=1e-3, version='ridge_keops')
+        # Start with zero speeds (which is NOT a0=0 in the logdet model!)
+        self.a0 = [None] * self.K
+        self.initialize_a0()
+        # self.initialize_a0(alpha=1e-3, version='ridge_keops')
 
     ################################################################
 
-    def initialize_momenta(self, **v2p_args):
-        '''Return initial momenta a0 corresponding to zero speeds.
-        (Which is NOT a0=0 in the logdet model!)
+    def initialize_a0(self, **v2p_args):
         '''
-        a0 = [None] * self.K
+        Set initial momenta a0 corresponding (approximately) to zero speeds, given current support points q0.
+        '''
         for k in range(self.K):
-            v0 = torch.zeros(self.q0[k].shape, **self.compspec)
-            a0[k] = self.LMi.v2p(self.q0[k], v0, **v2p_args)
-        return a0
+            v0k_at_q0 = torch.zeros(self.q0[k].shape, **self.compspec)
+            self.a0[k] = self.LMi.v2p(self.q0[k], v0k_at_q0, **v2p_args)
+
+    def update_a0(self, q0_prev, a0_prev=None, **v2p_args):
+        '''
+        Update a0 so that the new vector field v(q0,a0) be as close as possible to v(q0_prev,a0_prev).
+        (Corresponding to the projection of v(q0_prev,a0_prev) on the RKHS span of {K_z |z in q0})
+        If a0_prev is None (default), use self.a0, so the update simply reflects the change of support points.
+        '''
+        if a0_prev is None:
+            a0_prev = self.a0
+        for k in range(self.K):
+            v0k_at_q0 = self.LMi.v(self.q0[k], q0_prev[k], a0_prev[k])
+            self.a0[k] = self.LMi.v2p(self.q0[k], v0k_at_q0, **v2p_args)
 
     ################################################################
     ### Fixing a smaller number of LDDMMM support points : use decimation, or a rectangular grid
@@ -394,7 +406,10 @@ class diffPSR(multiPSR):
         :param yticks: list or 1d array. If provided, imposes the Y coordinates of the support grid (overriding "rho" parameter).
         '''
 
+        self.rho = rho
         Rcover = rho * self.LMi.Kernel.sigma
+        self.support_scheme = scheme
+        q0_prev = self.q0
 
         if scheme == "decim":
             # supp_ids[k,s] = ids of support points in original point set x[k,s]
@@ -412,7 +427,7 @@ class diffPSR(multiPSR):
 
         elif scheme == "grid":
             if xticks is None or yticks is None:
-                xmin,xmax,ymin,ymax = get_bounds(*self.allx0, relmargin=0)
+                xmin,xmax,ymin,ymax = get_bounds(*self.allx0, relmargin=0.1)
             if xticks is None:
                 xticks = np.arange(xmin-Rcover/2, xmax+Rcover/2, Rcover)
             if yticks is None:
@@ -425,10 +440,8 @@ class diffPSR(multiPSR):
         else:
             raise ValueError(f"Unknown value of support point scheme : {scheme}. Only values available are 'decim' and 'grid'.")
 
-        self.support_scheme = scheme
         # Don't forget to update a0 in consequence
-        self.a0 = self.initialize_momenta()
-
+        self.update_a0(q0_prev, rcond=1e-1)
 
     ################################################################
     ################################################################
@@ -459,7 +472,6 @@ class diffPSR(multiPSR):
                 return ( (x - y)**2 / (2*sig2[:,None]) ).sum()
 
         return dataloss_func
-
 
     ################################################################
     ################################################################
@@ -498,21 +510,21 @@ class diffPSR(multiPSR):
             for s in range(self.S):
                 self.update_quadloss(k,s)
 
-            # Report for this frame, print full free energy (to check that it only decreases!)
-            self.update_FE(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change ={change:.4}.")
-
             # Check whether all data points stayed covered by support points during the shooting.
             # A warning is issued if some warped data points end up at a distance > Rcoverwarning*LMi.Kernel.sigma
             # from all support points, at any time during the shooting procedure (unlike "rho" which only concerns time t=0).
 
             if self.support_scheme is not None:
-                Rcoverwarning = 1                           # (hard-modify here if necessary)
+                Rcoverwarning = 2.0                       # (hard-modify here if necessary)
                 for t in range(len(self.shoot[k])):
                     qk, xk = self.shoot[k][t][0], self.shoot[k][t][3]
                     uncoveredxk = self.LMi.Kernel.check_coverage(xk, qk, Rcoverwarning)
                     if uncoveredxk.any():
                         print(f"WARNING : shooting, time step {t} : {uncoveredxk.sum()} uncovered points ({uncoveredxk.sum()/xk.shape[0]:.2%})")
                         warnings.warn("Uncovered points during LDDMM shooting. Choose a smaller rho when defining the support scheme.", RuntimeWarning)
+
+            # Report for this frame, print full free energy (to check that it only decreases!)
+            self.update_FE(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change ={change:.4}.")
 
 
 #######################################################################
