@@ -11,8 +11,8 @@ import torch
 
 # Imports from diffICP module
 
-from diffICP.core.LDDMM_logdet import LDDMMModel
-from diffICP.core.Affine_logdet import AffineModel
+from diffICP.core.LDDMM import LDDMMModel
+from diffICP.core.affine import AffineModel
 
 
 #################################################

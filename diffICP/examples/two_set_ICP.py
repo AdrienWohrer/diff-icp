@@ -23,8 +23,8 @@ import torch
 # Import from diffICP module
 
 from diffICP.core.GMM import GaussianMixtureUnif
-from diffICP.core.LDDMM_logdet import LDDMMModel
-from diffICP.core.Affine_logdet import AffineModel
+from diffICP.core.LDDMM import LDDMMModel
+from diffICP.core.affine import AffineModel
 from diffICP.core.PSR import diffPSR, affinePSR
 from diffICP.visualization.visu import my_scatter, get_bounds, on_top
 from diffICP.tools.spec import defspec

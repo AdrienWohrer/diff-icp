@@ -15,8 +15,8 @@ import torch
 # Import from other files in this directory :
 
 from diffICP.core.GMM import GaussianMixtureUnif
-from diffICP.core.LDDMM_logdet import LDDMMModel
-from diffICP.core.Affine_logdet import AffineModel
+from diffICP.core.LDDMM import LDDMMModel
+from diffICP.core.affine import AffineModel
 from diffICP.core.registrations import LDDMMRegistration, AffineRegistration
 from diffICP.tools.decimate import decimate
 from diffICP.tools.spec import defspec

@@ -18,7 +18,7 @@ torch.random.manual_seed(1234)
 # Import from diffICP module
 
 from diffICP.core.GMM import GaussianMixtureUnif
-from diffICP.core.LDDMM_logdet import LDDMMModel
+from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.PSR import diffPSR
 from diffICP.visualization.visu import my_scatter
 from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets

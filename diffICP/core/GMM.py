@@ -164,7 +164,7 @@ class GaussianMixtureUnif_basic(Module):
 
     ### Produce a sample from the GMM distribution
 
-    def get_sample(self, N, rng=np.random.default_rng()):
+    def get_sample(self, N):
         """Generates a sample of N points."""
         samp = self.sigma * torch.randn(N, self.D, **self.spec)     # random normal samples
         # center around (random) components
@@ -175,10 +175,9 @@ class GaussianMixtureUnif_basic(Module):
 
     ### PLOTTING FUNCTION (adapted from a KeOps tutorial)
 
-    #
-
     def plot(self, *samples, bounds=None, heatmap=True, color=None, cmap=cm.RdBu, heatmap_amplification=-1, registration=None):
-        """Displays the model in 2D (adapted from a KeOps tutorial).
+        """
+        Displays the model in 2D (adapted from a KeOps tutorial).
         Boundaries for plotting can be specified in either of two ways :
             (a) bounds = [xmin,xmax,ymin,max] provides hard-coded limits (primary used information if present)
          or (b) *samples = list of points sets of size (?,2). In which case, the plotting boundaries are automatically
