@@ -8,7 +8,7 @@ Gaussian Mixture Model functionalities. Adaptation of the GaussianMixture presen
 
 # Standard imports
 
-import copy, math
+import copy, math, time
 import importlib.util
 
 import numpy as np
@@ -121,8 +121,7 @@ class GaussianMixtureUnif_basic(Module):
     ###
     #####################################################################
 
-    @staticmethod
-    def log_ratio_to_proba(eta):
+    def log_ratio_to_proba(self, eta):
         '''
         From log-odds-ratio to log probabilities in a Bernoulli distribution.
         This can be parallelized, i.e., eta, p and q can be arrays (of similar size).
@@ -131,7 +130,8 @@ class GaussianMixtureUnif_basic(Module):
         :return: log p, log q
         '''
 
-        eta = torch.tensor(eta)                                                     # to be sure
+        if not isinstance(eta, torch.Tensor):
+            eta = torch.tensor(eta, **self.spec)                                    # try to convert
         Z = torch.stack((torch.zeros(eta.shape), eta), dim=0).logsumexp(dim=0)      # exp(Z) = 1 + exp(eta)
         return eta-Z, -Z
 
@@ -190,7 +190,6 @@ class GaussianMixtureUnif_basic(Module):
         if self.outliers is not None:
             # In that case, gamma_nc above represent CONDITIONAL responsibilities, given that x_n is not an outlier.
             eta0 = self.outliers["eta0"]                 # eta0 = log(pi_0/1-pi_0) ; current outliers log-odds-ratio for GMM model
-            print(eta0)
             logJ0 = -np.log(self.outliers["vol0"])       # J0 = P(x|outlier) = 1 / vol0
             eta0_n = eta0 + logJ0 - T_n                                # outliers log-odds-ratio for EM responsibilities of component n
             lgamma0_n, lgammaT_n = self.log_ratio_to_proba(eta0_n)     # gamma0_n = outlier responsibility for component n ; gammaT_n = 1 - gamma0_n
@@ -222,7 +221,7 @@ class GaussianMixtureUnif_basic(Module):
 
         lpi_c = self.w - self.w.logsumexp(dim=0)
         Cfe_n_comp = (gamma_nc * ( ( (self.mu ** 2).sum(-1)[None,:] - (Y**2).sum(-1)[:,None] ) / (2 * self.sigma ** 2)
-                            + loggaussnorm  + lgamma_nc - lpi_c[None,:] )).sum(dim=1)
+                            + lgamma_nc - lpi_c[None,:] )).sum(dim=1) + loggaussnorm
         if self.outliers is None:
             Cfe = Cfe_n_comp.sum()
         else:
@@ -448,26 +447,37 @@ class GaussianMixtureUnif_keops(GaussianMixtureUnif_basic):
     # or alternatively
     #   res_c = sum_n ( gamma_{nc}*stuff(n,c) )  with stuff > 0       --> res = lgam_nc.logsumexp(weight=stuff,axis=0).exp()
 
-    ### E step : Compute log-responsibilities (returned as a symbolic keops LazyTensor).
-    # For convenience, also compute and return h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
 
-    # TODO add outlier handling in this framework
+    ### E step : Compute log-responsibilities (returned as a symbolic keops LazyTensor).
+    # TODO write docstring
 
     def E_step_keops(self, X):
 
-        X = X.detach()  # to be sure
-        D2_nc = Vi(X).sqdist(Vj(self.mu))  # Quadratic distances (symbolic Keops matrix)
-        k_nc = Vj(self.w.view(self.C, 1)) - D2_nc / (2 * self.sigma ** 2)
-        # log(gamma_nc) before normalization
-        Z_n = k_nc.logsumexp(axis=1)  # exp(Z_n) = sum_c exp(k_nc)
-        lgam_nc = k_nc - Vi(Z_n)  # hence gamma_nc = exp(lgam_nc) ; and sum_c gamma_nc = 1
-        h_c = lgam_nc.logsumexp(axis=0)  # exp(h_c) = N_c = \sum_n gamma_{nc}
-        return lgam_nc, h_c
+        X = X.detach()                                                      # to be sure
+        D2_nc = Vi(X).sqdist(Vj(self.mu))                                   # Quadratic distances (symbolic Keops matrix)
+        loggaussnorm = torch.tensor(self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi)), **self.spec)
+        Zw = self.w.logsumexp(dim=0)
+        t_nc = Vj(self.w.view(self.C, 1)) - D2_nc / (2 * self.sigma ** 2) - Zw - loggaussnorm   # exp(t_nc) = pi_c * P(x_n|cluster_c)
+        T_n = t_nc.logsumexp(axis=1)                                                            # exp(T_n) = sum_c exp(t_nc) ; "total component score"
+        lgam_nc = t_nc - Vi(T_n)                                                                # gamma_nc = exp(lgam_nc) ; sum_c gamma_nc = 1
+
+        if self.outliers is not None:
+            # In that case, gamma_nc above represent CONDITIONAL responsibilities, given that x_n is not an outlier.
+            eta0 = self.outliers["eta0"]                # eta0 = log(pi_0/1-pi_0) ; current outliers log-odds-ratio for GMM model
+            logJ0 = -np.log(self.outliers["vol0"])      # J0 = P(x|outlier) = 1 / vol0
+            eta0_n = eta0 + logJ0 - T_n                 # outliers log-odds-ratio for EM responsibilities of component n
+            lgam0_n, lgamT_n = self.log_ratio_to_proba(eta0_n)  # gamma0_n = outlier responsibility for component n ; gammaT_n = 1 - gamma0_n
+        else:
+            lgam0_n, lgamT_n = None, None
+
+        return lgam_nc, lgam0_n, lgamT_n
+
 
     ### "M step" : Update GMM parameters, given data X and log-responsibilities lgam_nc.
-    # Computation can be made a little faster by providing numbers h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
+    # Must also provide lgam0_n and lgamT_n (outlier / non outlier log responsibilities) is self.outliers is not None
+    # TODO write docstring
 
-    def M_step_keops(self, X, lgam_nc, h_c=None):
+    def M_step_keops(self, X, lgam_nc, lgam0_n=None, lgamT_n=None):
 
         X = X.detach()  # to be sure
         N = X.shape[0]
@@ -476,48 +486,55 @@ class GaussianMixtureUnif_keops(GaussianMixtureUnif_basic):
             self.mu = lgam_nc.sumsoftmaxweight(Vi(X), axis=0).reshape(self.C, self.D)
 
         if self.to_optimize["w"]:
-            if h_c is None:
-                h_c = lgam_nc.logsumexp(axis=0)  # exp(h_c) = N_c = \sum_n gamma_{nc}
-            self.w = (h_c - h_c.mean()).view(self.C)  # (w = h_c + arbitrary constant, chosen here so that w.mean()=0 )
+            h_c = lgam_nc.logsumexp(axis=0)         # exp(h_c) = N_c = \sum_n gamma_{nc}  [GMM score without outliers]
+            self.w = h_c.view(self.C)               # (w = h_c + arbitrary constant, chosen here as 0)
+
+        if self.outliers is not None and self.to_optimize["eta0"]:
+            self.outliers["eta0"] = lgam0_n.logsumexp(dim=0) - lgamT_n.logsumexp(dim=0)  # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
 
         if self.to_optimize["sigma"]:
             D2_nc = Vi(X).sqdist(Vj(self.mu))  # Quadratic distances (symbolic Keops matrix)
             # NDsigma2 = lgam_nc.sumsoftmaxweight(D2_nc, axis=1).sum()
-            NDsigma2 = lgam_nc.logsumexp(weight=D2_nc,
-                                         axis=0).exp().sum()  # marginally faster (like, -10% when N=10000)
+            NDsigma2 = lgam_nc.logsumexp(weight=D2_nc, axis=0).exp().sum()  # marginally faster (~= -10% when N=10000)
             self.sigma = (NDsigma2 / (self.D * N)).sqrt().item()  # (.item() to return a simple float)
 
     ### Compute EM-related values : Y (quadratic targets) and Cfe (free energy offset)
-    # Computation can be made a little faster by providing numbers h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
 
-    def EM_values_keops(self, lgam_nc, h_c=None):
+    def EM_values_keops(self, lgam_nc, lgam0_n=None, lgamT_n=None):
 
-        # "Cibles quadratiques" Y(N,D)
+        # "Quadratic targets" Y(N,D)
         N = lgam_nc.shape[0]
         Y = lgam_nc.sumsoftmaxweight(Vj(self.mu), axis=1).reshape(N, self.D)
 
-        # "Free energy offset" term (part of the free energy that does not depend directly on the points X)
-        # Cfe = sum_n sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) - log(pi_c) + log(gamma_{nc}) ]
+        ### "Free energy offset" term (part of the free energy that does not depend directly on the points X)
+        # Without outliers:
+        #   Cfe = sum_n Cfe_n
+        #   Cfe_n = sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) -D/2*log(2pi) - log(pi_c) + log(gamma_{nc}) ]
+        # With outliers:
+        #   Cfe = sum_n [ (1-gamma0_n) [ Cfe_n + log(1-gamma0_n) - log(1-pi0)] + gamma0_n [ -logJ0 + log gamma0_n - log pi0 ] ]
 
-        logpi_c = (self.w - torch.logsumexp(self.w, 0)).view(self.C, 1)  # keops requires 2D
-        if h_c is None:  # computation not requiring explicitly N_c (a little slower)
-            Cfe = N * self.D * np.log(self.sigma) + lgam_nc.sumsoftmaxweight(
-                Vj(self.mu).sqnorm2() / (2 * self.sigma ** 2) - Vi(Y).sqnorm2() / (2 * self.sigma ** 2) - Vj(
-                    logpi_c) + lgam_nc, axis=1).sum()
-        else:  # a little faster
-            N_c = h_c.exp()
-            Cfe = ((N_c * (self.mu ** 2).sum(-1, True)).sum() - (Y ** 2).sum()) / (2 * self.sigma ** 2) \
-                  + N * self.D * np.log(self.sigma) - (N_c * logpi_c).sum() \
-                  + (lgam_nc.sumsoftmaxweight(lgam_nc, axis=0) * N_c).sum()
+        lpi_c = (self.w - torch.logsumexp(self.w, 0)).view(self.C, 1)  # keops requires 2D
+        loggaussnorm = self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi))
+
+        Cfe_n_comp = lgam_nc.sumsoftmaxweight( Vj(self.mu).sqnorm2() / (2 * self.sigma ** 2) - Vi(Y).sqnorm2() / (2 * self.sigma ** 2)
+                                                   - Vj(lpi_c) + lgam_nc , axis=1) + loggaussnorm
+        if self.outliers is None:
+            Cfe = Cfe_n_comp.sum()
+        else:
+            gamma0_n = lgam0_n.exp()
+            gammaT_n = lgamT_n.exp()
+            lpi0, lpiT = self.log_ratio_to_proba(self.outliers["eta0"])
+            logJ0 = -np.log(self.outliers["vol0"])  # J0 = P(x|outlier) = 1 / vol0
+            Cfe = (gammaT_n * (Cfe_n_comp + lgamT_n - lpiT) + gamma0_n * (-logJ0 + lgam0_n - lpi0)).sum()
 
         return Y, Cfe.item()  # .item() to return a simple float
 
     ### All three operation (E+M+compute Y and Cfe). Kept for simplicity
 
     def EM_step_keops(self, X):
-        lgam_nc, h_c = self.E_step_keops(X)
-        self.M_step_keops(X, lgam_nc, h_c)
-        Y, Cfe = self.EM_values_keops(lgam_nc, h_c)
+        log_gammas = self.E_step_keops(X)
+        self.M_step_keops(X, *log_gammas)
+        Y, Cfe = self.EM_values_keops(*log_gammas)
         return Y, Cfe
 
 
@@ -606,6 +623,7 @@ if __name__ == '__main__':
         }
         GMM.outliers = {"vol0": (xmax-xmin)*(ymax-ymin), "eta0": 0.0}
         n = 0
+        start = time.time()
         while n<100:
             n+=1
             print(n)
@@ -619,18 +637,19 @@ if __name__ == '__main__':
             # lgam_keops,_ = GMM.E_step_keops(x)
             # print(lgam_keops.sumsoftmaxweight(Vi(x), axis=0).reshape(C,2))
 
-            print(GMM.likelihoods(x))
-            print(GMM.log_likelihoods(x))
+            # print(GMM.likelihoods(x))
+            # print(GMM.log_likelihoods(x))
 
-            # GMM.EM_step(x)
-            GMM.EM_step_pytorch(x)
+            GMM.EM_step(x)
+            # GMM.EM_step_pytorch(x)
+            print(f"Outlier weight: {GMM.log_ratio_to_proba(GMM.outliers['eta0'])[0].exp().item()}" )
     #        print(GMM)
     #        input()
 
             plt.pause(.1)
 
         # input()
-    
+        print(f"Done. Total time : {time.time()-start}")
 
     ### Test plotting function with registration (experimental!)
     if False:
