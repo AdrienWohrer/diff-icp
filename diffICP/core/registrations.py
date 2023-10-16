@@ -36,7 +36,7 @@ class Registration:
 
     # ---------------------
     def shoot(self, X:torch.Tensor, backward=False):
-        '''Compute the 'shoot' variable on external point set X. (See LDDMM_logdet.py and Affine_logdet.py)'''
+        '''Compute the 'shoot' variable on external point set X. (See LDDMM.py and affine.py)'''
         pass
 
 
@@ -54,7 +54,7 @@ class LDDMMRegistration(Registration):
 
     # ---------------------
     def shoot(self, X:torch.Tensor, backward=False, previous_forwardshoot=None):
-        '''Compute the LDDMM "shooting" on external point set X. Return a "shoot" variable (see LDDMM_logdet.py)
+        '''Compute the LDDMM "shooting" on external point set X. Return a "shoot" variable (see LDDMM.py)
         When backward=True, uses the inverse diffeomorphism. In that case, a shoot variable corresponding to a previous
         forward registration can be provided, if available, to gain a little time (meh...)'''
 
@@ -100,7 +100,7 @@ class AffineRegistration(Registration):
 
     # ---------------------
     def shoot(self, X:torch.Tensor):
-        '''Compute the Affine "shooting" on external point set X. Return a "shoot" variable (see Affine_logdet.py)'''
+        '''Compute the Affine "shooting" on external point set X. Return a "shoot" variable (see affine.py)'''
         # TODO: backward version not implemented
 
         return self.AffMi.Shoot(self.M, self.t, X)

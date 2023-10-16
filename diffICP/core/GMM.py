@@ -1,6 +1,8 @@
 '''
 Gaussian Mixture Model functionalities. Adaptation of the GaussianMixture presented in KeOps tutorials, with the following main modifications:
+
 - only uniform isotropic covariances sigma^2*Id
+
 - added functions for EM fitting of the model to a set of data
 '''
 
@@ -11,6 +13,7 @@ import importlib.util
 
 import numpy as np
 from matplotlib import pyplot as plt
+import matplotlib
 import matplotlib.cm as cm
 
 import torch
@@ -38,34 +41,72 @@ from diffICP.visualization.visu import get_bounds, my_scatter
 
 class GaussianMixtureUnif_basic(Module):
 
-    ### Initialization
-    # mu0 = initial emplacement of centroids
-    # spec = dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
+    def __init__(self, mu, spec=defspec):
+        '''
+        Gaussian Mixture Model with uniform isotropic covariances sigma^2*Id
 
-    def __init__(self, mu0, spec=defspec):
+        Implementation is based on log scores, log odd-ratios, etc., which are more stable numerically.
+
+        Component priors are encoded by the SCORES w_c such that pi_c = exp(w_c) / sum_{c'} exp(w_{c'}). Thus (in Pytorch),
+
+        - pi = softmax(w)
+
+        - logpi = w - w.logsumexp()
+
+        Similarly, EM responsibitilies are encoded by their logarithm, lgamma_nc = log(gamma_nc).
+
+        The Outlier component, if present, is encoded with the following scheme :
+
+        - The overall balance of outlier/non outlier if given by a LOG-ODDS-RATIO eta0
+
+        - Component scores w_c above refer to "GMM only" scores, thus for example the overall weight of component c when counting outliers is pi_c / (1+exp(eta0))
+
+        - Similarly, the balance of outlier/non outlier responsibility on a given sample n is given by a LOG-ODDS-RATIO eta0n.
+
+        - Variables lgamma_nc above refer to "GMM only" responsibilities ; the overall responsibility of component c on sample n when counting outliers is gamma_nc / (1+exp(eta0n))
+
+        This is the basic initialization function. Many other parameters (self.to_optimize, self.outliers, etc.) can be set afterwards, see comments in the code.
+
+        :param mu:  initial emplacement of centroids (mu.shape[0] thus provides the -fixed- number of Gaussian components)
+        :param spec:  dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
+        '''
+
         super(GaussianMixtureUnif_basic, self).__init__()			# https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
 
         self.params = {}
         self.spec = spec
-        self.mu = mu0.clone().detach().to(**spec)           # Just to be sure, copy and detach from any computational graph
+        self.mu = mu.clone().detach().to(**spec)            # Just to be sure, copy and detach from any computational graph
         self.C, self.D = self.mu.shape
         r = self.mu.var(0).sum().sqrt().item()              # "typical radius" of the cloud of centroids. Hence, each centroid takes a "typical volume" r^D/C
         self.sigma = 0.1 * (r / self.C**(1/self.D))         # 0.1 times the "typical radius" of each centroid
         self.w = torch.zeros(self.C, **spec)                # w_c = "score" de chaque composante. Son poids est pi_c = exp(w_c) / sum_{c'} exp(w_{c'})
-        self.to_optimize = {
+        self.to_optimize = {                # (To set afterwards, externally, if required)
             "sigma" : True,
             "mu" : True,
-            "w" : True
+            "w" : True,
+            "eta0" : True                     # Optimize outlier log-odds-ratio, if an outlier scheme is used
         }
+        self.outliers = None
+        # self.outliers = {                   # To set afterwards, externally, if required
+        #     "vol0" : None,                  # Reference volume of the 'outlier' distribution
+        #     "eta0" : 0.0                    # (Initial) value of log-odds-ratio for 'outlier' vs. "GMM"
+        # }
 
     def __str__(self):
+        '''
+        Printable summary string of the GMM's parameters.
+        '''
         s = super(GaussianMixtureUnif_basic, self).__str__()
         s+= ": Gaussian Mixture with Uniform covariances. Parameters:\n"
         s+= "    C [# components] : "+str(self.C)+"\n"
         s+= "    sigma [unif. std] : " +str(self.sigma)+"\n"
         s+= "    mu_c [centroids] :" +str(self.mu)+"\n"
         s+= "    w_c [component scores]:" +str(self.w)+"\n"
+        if self.outliers is not None:
+            s+= "    vol0 [ref. volume for outliers]:" +str(self.outliers["vol0"])+"\n"
+            s+= "    w0 [outlier vs GMM scores]:" +str(self.outliers["w0"])+"\n"
         return s
+
 
     # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
@@ -73,87 +114,123 @@ class GaussianMixtureUnif_basic(Module):
         self.__dict__.update(state)
         self.spec = defspec
 
+
     #####################################################################
     ###
     ### EM algorithm functions
     ###
     #####################################################################
 
-    ### Basic implementation principle :
-    # the responsibilities gamma_nc of each centroid mu_c for each data point X_n are coded by their log lgamma_nc. Thus (in Pytorch),
-    #       gamma_nc = lgamma_nc.exp()
-    # Similarly, component priors are encoded by the SCORES w_c such that pi_c = exp(w_c) / sum_{c'} exp(w_{c'}). Thus (in Pytorch),
-    #       pi = w.softmax()
-    #       logpi = w - w.logsumexp()
+    @staticmethod
+    def log_ratio_to_proba(eta):
+        '''
+        From log-odds-ratio to log probabilities in a Bernoulli distribution.
+        This can be parallelized, i.e., eta, p and q can be arrays (of similar size).
 
-    ### Useful function : Compute log-responsibilities
-    #     lgamma = log_responsibilities(X)
-    # with
-    #   - X(N,D) : data points [pytorch tensor]
-    #   - lgamma(N,C) : log-responsibility of each data point X_n to each GMM component c [pytorch tensor]
+        :param eta: log-odds-ratio of a Bernoulli distribution, i.e., eta=log(p/q)
+        :return: log p, log q
+        '''
 
-    def log_responsibilities(self,X):
+        eta = torch.tensor(eta)                                                     # to be sure
+        Z = torch.stack((torch.zeros(eta.shape), eta), dim=0).logsumexp(dim=0)      # exp(Z) = 1 + exp(eta)
+        return eta-Z, -Z
+
+    # -------------------------------
+    def log_responsibilities(self, X):
+        '''
+        Compute log-responsibilities (without outliers).
+
+        :param X: torch.tensor of size (N,D) : data points
+        :return: torch.tensor of size (N,C) : log-responsibility lgamma_nc of each data point X_n to each GMM component c
+        '''
 
         X = X.detach()                                                              # to be sure
         D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)                        # shape (N,C)
         lgamma_nc = log_softmax(self.w[None,:] - D2_nc/(2*self.sigma**2), dim=1)    # shape (N,C)
         return lgamma_nc
 
-    ### EM_step function (pytorch version)
-    #       Y,Cfe = EM_step(X)
-    # The function performs ONE alternation of (E step,M step) for fitting the GMM model to the data points X.
-    # E step : compute (log)-responsibilities gamma_nc of each data points X_n to each GMM component c
-    # M step : update GMM parameters based on the new log-responsibilities
-    # Input :
-    #   - X(N,D) : data points
-    # Outputs :
-    #   - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c )
-    #   - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values
+    # -------------------------------
+    def EM_step_pytorch(self, X):
+        '''
+        EM_step function (pytorch version). Performs ONE alternation of (E step, M step) for fitting the GMM model to the data points X.
 
-    ### This is the plain _pytorch implementation :
-    #
-    # Reductions over either dimension (N or C) can be performed, e.g., as:
-    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = (softmax(lgamma_nc,dim=0) * stuff).sum(dim=0)
-    #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = (lgamma_nc.exp() * stuff).sum(dim=1)
+        E step : compute (log)-responsibilities gamma_nc of each data points X_n to each GMM component c (plus outlier responsibilities if present).
 
-    def EM_step_pytorch(self,X):
+        M step : update GMM parameters based on the new log-responsibilities.
+
+        This function updates the GMM's internal state + returns two quantities of potential interest, Y and Cfe (see below).
+
+        :param X: torch.tensor(N,D) - data points.
+        :return:
+          - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
+          - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values.
+        '''
+
+        ### This is the plain _pytorch implementation. Reductions over either dimension (N or C) can be performed, e.g., as:
+        #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = (softmax(lgamma_nc,dim=0) * stuff).sum(dim=0)
+        #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = (lgamma_nc.exp() * stuff).sum(dim=1)
+        # NOTA: in this Pytorch version, it would be suboptimal to separate the E_step and M_step in two separate functions,
+        # because both rely on the quadratic distance matrix D2_nc, that should better be computed only once.
 
         X = X.detach()                                              # to be sure
         N = X.shape[0]
 
-        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)        # shape (N,C)
+        D2_nc = ((X[:,None,:]-self.mu[None,:,:])**2).sum(-1)        # _nc means that shape = (N,C)
+        loggaussnorm = self.D * ( np.log(self.sigma) + 0.5*np.log(2*math.pi) )
+        Zw = self.w.logsumexp(dim=0)
 
-        # "E step" : compute responsibilities (using previous GMM parameters)
+        ### "E step" : compute responsibilities (using previous GMM parameters)
 
-        lgamma_nc = log_softmax(self.w[None,:] - D2_nc/(2*self.sigma**2), dim=1)  # shape (N,C)
+        t_nc = self.w[None, :] - Zw - D2_nc/(2*self.sigma**2) - loggaussnorm     # exp(t_nc) = pi_c * P(x_n|cluster_c)
+        T_n = t_nc.logsumexp(dim=1)                                         # exp(T_n) = \sum_{c>=1} exp(t_nc)  ; "total component score"
+        lgamma_nc = t_nc - T_n[:,None]
+        # equivalently,  lgamma_nc = log_softmax(t_nc, dim=1).  But T_n is explicitly required when there are outliers, see below.
         gamma_nc = lgamma_nc.exp()
 
-        # "M step" : update GMM parameters
+        if self.outliers is not None:
+            # In that case, gamma_nc above represent CONDITIONAL responsibilities, given that x_n is not an outlier.
+            eta0 = self.outliers["eta0"]                 # eta0 = log(pi_0/1-pi_0) ; current outliers log-odds-ratio for GMM model
+            print(eta0)
+            logJ0 = -np.log(self.outliers["vol0"])       # J0 = P(x|outlier) = 1 / vol0
+            eta0_n = eta0 + logJ0 - T_n                                # outliers log-odds-ratio for EM responsibilities of component n
+            lgamma0_n, lgammaT_n = self.log_ratio_to_proba(eta0_n)     # gamma0_n = outlier responsibility for component n ; gammaT_n = 1 - gamma0_n
+
+        ### "M step" : update GMM parameters
 
         if self.to_optimize["mu"]:
             self.mu = softmax(lgamma_nc,dim=0).t() @ X      # shape (C,2)
-            
+
+        if self.outliers is not None and self.to_optimize["eta0"]:
+            self.outliers["eta0"] = lgamma0_n.logsumexp(dim=0) - lgammaT_n.logsumexp(dim=0)       # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
+
         if self.to_optimize["w"]:
-            h_c = lgamma_nc.logsumexp(dim=0)             # exp(h_c) = N_c = \sum_n gamma_{nc}
-            self.w = h_c - h_c.mean()                    # (w = h_c + arbitrary constant, chosen here so that w.mean()=0 )
+            self.w = lgamma_nc.logsumexp(dim=0)                             # exp(w_c) = sum_n gamma_{nc} [GMM score without outliers]
 
         if self.to_optimize["sigma"]:
             NDsigma2 = (gamma_nc * D2_nc).sum()
-            self.sigma = ( NDsigma2/(self.D*N) ).sqrt().item()      # .item() to return a simple float
+            self.sigma = ( NDsigma2/(self.D*N) ).sqrt().item()              # .item() to return a simple float
 
-        # "Quadratic targets" Y(N,D)
+        ### "Quadratic targets" Y(N,D)
         Y = (gamma_nc[:,:,None] * self.mu[None,:,:]).sum(1).reshape(N,self.D)
 
-        # "Free energy offset" term (part of the free energy that does not depend directly on the points X)
-        # Cfe = sum_n sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) - log(pi_c) + log(gamma_{nc}) ]
-        logpi_c = self.w - self.w.logsumexp(dim=0)
-        Cfe = (gamma_nc * ( ( (self.mu ** 2).sum(-1)[None,:] - (Y**2).sum(-1)[:,None] ) / (2 * self.sigma ** 2)
-                            + self.D * np.log(self.sigma) - logpi_c[None,:] + lgamma_nc ) ).sum()
+        ### "Free energy offset" term (part of the free energy that does not depend directly on the points X)
+        # Without outliers:
+        #   Cfe = sum_n Cfe_n
+        #   Cfe_n = sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) -D/2*log(2pi) - log(pi_c) + log(gamma_{nc}) ]
+        # With outliers:
+        #   Cfe = sum_n [ (1-gamma0_n) [ Cfe_n + log(1-gamma0_n) - log(1-pi0)] + gamma0_n [ -logJ0 + log gamma0_n - log pi0 ] ]
 
+        lpi_c = self.w - self.w.logsumexp(dim=0)
+        Cfe_n_comp = (gamma_nc * ( ( (self.mu ** 2).sum(-1)[None,:] - (Y**2).sum(-1)[:,None] ) / (2 * self.sigma ** 2)
+                            + loggaussnorm  + lgamma_nc - lpi_c[None,:] )).sum(dim=1)
+        if self.outliers is None:
+            Cfe = Cfe_n_comp.sum()
+        else:
+            gamma0_n = lgamma0_n.exp()
+            gammaT_n = lgammaT_n.exp()
+            lpi0, lpiT = self.log_ratio_to_proba(self.outliers["eta0"])
+            Cfe = (gammaT_n * (Cfe_n_comp + lgammaT_n - lpiT) + gamma0_n * (-logJ0 + lgamma0_n - lpi0)).sum()
         return Y, Cfe.item()
-
-    # NOTA: in this Pytorch version, it would be suboptimal to separate the E_step and M_step in two separate functions,
-    # because both rely on the quadratic distance matrix D2_nc, that should better be computed only once.
 
 
     #####################################################################
@@ -161,6 +238,12 @@ class GaussianMixtureUnif_basic(Module):
     ### Other GMM functions
     ###
     #####################################################################
+
+    ### Return component weights
+
+    def pi(self):
+        '''Return the vector of GMM component weights pi_c (instead of their log-scores w). Without outliers.'''
+        return softmax(self.w)
 
     ### Produce a sample from the GMM distribution
 
@@ -266,6 +349,52 @@ class GaussianMixtureUnif_basic(Module):
             extent=(xmin, xmax, ymin, ymax),
         )
 
+    ### PLOTTING FUNCTION FOR DEMONSTRATION : EACH CLUSTER WITH A DIFFERENT COLOR (TODO)
+
+    def plot_demo(self, *samples, lgam_nc=None, bounds=None, cluster_colors=None):
+        """
+        Displays the model in 2D (adapted from a KeOps tutorial), for demonstration.
+        Each cluster is associated to a different color.
+        Boundaries for plotting can be specified in either of two ways :
+            (a) bounds = [xmin,xmax,ymin,max] provides hard-coded limits (primary used information if present)
+         or (b) *samples = list of points sets of size (?,2). In which case, the plotting boundaries are automatically
+                computed to match to extent of these point sets. (Note that the *actual* plotting of these point sets,
+                if required, must be performed externally.)
+        """
+
+        ### bounds for plotting
+
+        if bounds != None:
+            # Use provided bounds directly
+            xmin, xmax, ymin, ymax = tuple(bounds)
+        else:
+            # Compute from centroids and/or associated samples
+            if len(samples) == 0:
+                # get bounds directly from centroids
+                samples = (self.mu,)
+            xmin, xmax, ymin, ymax = get_bounds(*samples)    # in diffICP.visu
+
+        ### Cycling colors
+        if cluster_colors is None:
+            cluster_colors = [matplotlib.colors.to_rgb(str) for str in plt.rcParams['axes.prop_cycle'].by_key()['color']]
+
+        ### plot provided point sets with color representing the main cluster
+
+        for X in samples:
+            if lgam_nc is None:
+                lgam_nc = self.log_responsibilities(X)
+                affect = lgam_nc.argmax(dim=1)
+            affect = lgam_nc.argmax(dim=1)
+            # plt.plot(X[:,0],X[:,1],color=[cluster_colors[i] for i in affect])
+            for c in range(self.C):
+                plt.plot(X[affect==c,0],X[affect==c,1],'.',color=cluster_colors[c], alpha=.6)
+        for c in range(self.C):
+            plt.plot(self.mu[c,0], self.mu[c,1], "X", color="black", markersize=14)
+        plt.pause(.1)
+
+
+    #####################################################################
+
     ### Functions below are directly adapted from the original KeOps tutorial.
     ### They are included because they are used in the plotting function above
 
@@ -321,6 +450,8 @@ class GaussianMixtureUnif_keops(GaussianMixtureUnif_basic):
 
     ### E step : Compute log-responsibilities (returned as a symbolic keops LazyTensor).
     # For convenience, also compute and return h_c such that exp(h_c) = N_c = \sum_n gamma_{nc}
+
+    # TODO add outlier handling in this framework
 
     def E_step_keops(self, X):
 
@@ -398,6 +529,8 @@ class GaussianMixtureUnif_keops(GaussianMixtureUnif_basic):
 #####################################################################################
 #####################################################################################
 
+# TODO switch to a custom handling of torch/keops, as in kernel.py
+
 if use_keops:
     class GaussianMixtureUnif(GaussianMixtureUnif_keops):
         EM_step = GaussianMixtureUnif_keops.EM_step_keops
@@ -451,6 +584,15 @@ if __name__ == '__main__':
         #x = tensor(iris['data'])[:,:2].contiguous().type(torchdtype)  # 2 premières colonnes uniquement
         #N = x.shape[0]
 
+        from diffICP.visualization.visu import get_bounds
+        xmin, xmax, ymin, ymax = get_bounds(x)
+
+        # Add outliers
+        N_outliers = 300
+        outliers = torch.tensor([xmin, ymin])[None, :] + torch.tensor([xmax - xmin, ymax - ymin])[None, :] * torch.rand(N_outliers, 2)
+        x = torch.cat((x, outliers), dim=0)
+        x = x[torch.randperm(x.shape[0])]  # mix point order (to be sure)
+
         # Launch EM
 
         C = 10
@@ -458,10 +600,11 @@ if __name__ == '__main__':
         GMM = GaussianMixtureUnif(mu0)
         GMM.to_optimize = {
             "mu" : True,
-            "sigma" : False,
-            "w" : False
+            "sigma" : True,
+            "w" : True,
+            "eta0" : True
         }
-
+        GMM.outliers = {"vol0": (xmax-xmin)*(ymax-ymin), "eta0": 0.0}
         n = 0
         while n<100:
             n+=1
@@ -479,17 +622,18 @@ if __name__ == '__main__':
             print(GMM.likelihoods(x))
             print(GMM.log_likelihoods(x))
 
-            GMM.EM_step(x)
-    #        GMM.EM_step_pytorch(x)
+            # GMM.EM_step(x)
+            GMM.EM_step_pytorch(x)
     #        print(GMM)
     #        input()
+
             plt.pause(.1)
 
         # input()
     
 
     ### Test plotting function with registration (experimental!)
-    if True:
+    if False:
 
         plt.ion()
         bounds = (-0.5,1.5,-0.5,1.5)
@@ -521,3 +665,40 @@ if __name__ == '__main__':
         reglines.plot(color='gray',linewidth=0.5)
         plt.pause(.1)
         input()
+
+
+    ### Basic K-means demo
+    if False:
+
+        plt.ion()
+
+        ## Create datapoints
+        N = 1000
+        t = torch.linspace(0, 2 * np.pi, N + 1)[:-1]
+        x = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
+        x = x + 0.1 * torch.randn(x.shape)   # for demo
+        C = 10
+        mu0 = x[torch.randint(0, N, (C,)), :]
+        GMM = GaussianMixtureUnif(mu0)
+        GMM.to_optimize = {
+            "mu": True,
+            "sigma": False,
+            "w": False
+        }
+        GMM.sigma = 0.00001       # close to 0, so ~= K-means
+
+        n = 0
+        while n < 100:
+            n += 1
+            print(n)
+            plt.clf()
+
+            GMM.plot_demo(x)
+            input()
+
+            GMM.EM_step(x)
+
+
+
+
+

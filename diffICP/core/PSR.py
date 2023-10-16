@@ -20,6 +20,8 @@ from diffICP.core.affine import AffineModel
 from diffICP.core.registrations import LDDMMRegistration, AffineRegistration
 from diffICP.tools.decimate import decimate
 from diffICP.tools.spec import defspec
+from diffICP.tools.inout import read_point_sets
+
 from diffICP.visualization.visu import get_bounds       # (recycled for grid bounds computation)
 
 #######################################################################
@@ -63,37 +65,16 @@ class multiPSR:
 
         self.dataspec, self.compspec = dataspec, compspec
 
-        ### Check input format and return various dimensions
+        ### Read input point sets and various dimensions.
+        #   x: point sets, now cast in the format x[k][s] ;
+        #   self.K = number of frames
+        #   self.S = number of structures
+        #   self.D = dimension of space
 
-        if isinstance(x, torch.FloatTensor) or isinstance(x, torch.cuda.FloatTensor):
-            # single point set (single frame and structure)
-            x = [[x]]
-        elif isinstance(x, list):
-            if isinstance(x[0], torch.FloatTensor) or isinstance(x[0], torch.cuda.FloatTensor):
-                # multiple frames / single structure
-                x = [[xk] for xk in x]
-            else:
-                x = [xk.copy() for xk in x]   # copy x as a list of lists (does not copy the data point sets)
-        else:
-            raise ValueError("Wrong format for input x")
-
-        # Number of frames
-        self.K = len(x)
-
-        # Number of structures
-        allSs = list(set([len(xk) for xk in x]))
-        if len(allSs) > 1:
-            raise ValueError("All frames should have same number of structures")
-        self.S = allSs[0]
-
-        # Point set dimension
-        allDs = list(set([xks.shape[1] for xk in x for xks in xk]))
-        if len(allDs) > 1:
-            raise ValueError("All point sets should have same axis-1 dimension")
-        self.D = allDs[0]
+        x, self.K, self.S, self.D = read_point_sets(x)
 
         ### Use np.arrays with dtype=object to store the point sets (allows simpler indexing than "list of list of list")
-        # These point sets are stored on the device given by self.dataspec
+        # These point sets are stored on the device given by self.dataspec.
 
         # This must be made carefully to avoid unwanted conversions from pytorch to numpy, see
         # https://github.com/pytorch/pytorch/issues/85606
@@ -295,7 +276,7 @@ class multiPSR:
                 shoot = self.AffMi.Shoot(self.M[k], self.t[k], X)
 
         if isinstance(self,diffPSR) and self.support_scheme and not support:
-            x = [tup[3] for tup in shoot]   # plot "non-support" points of the shooting
+            x = [tup[-1] for tup in shoot]   # plot "non-support" points of the shooting
         else:
             x = [tup[0] for tup in shoot]   # in every other case
 
@@ -386,7 +367,7 @@ class diffPSR(multiPSR):
     ################################################################
     ### Fixing a smaller number of LDDMMM support points : use decimation, or a rectangular grid
 
-    def set_support_scheme(self, scheme="decim", rho=1.0, xticks=None, yticks=None):
+    def set_support_scheme(self, scheme="decim", rho=1.0, xticks=None, yticks=None, q0=None):
         '''
         Define a specific set of support points for LDDMM shooting. A smaller support point set (larger rho)
         allows to accelerate the LDDMM optimization. (Note that the registration + GMM optimization still apply
@@ -437,8 +418,12 @@ class diffPSR(multiPSR):
             # Use same support points for all frames (can be useful to compare them)
             self.q0 = [gridpoints] * self.K
 
+        elif scheme == "custom":
+            assert q0 is not None, "For a custom support scheme, please specify argument q0"
+            self.q0 = q0.clone().detach().to(**self.compspec).contiguous()
+
         else:
-            raise ValueError(f"Unknown value of support point scheme : {scheme}. Only values available are 'decim' and 'grid'.")
+            raise ValueError(f"Unknown value of support point scheme : {scheme}. Only values available are 'decim', 'grid' and 'custom'.")
 
         # Don't forget to update a0 in consequence
         self.update_a0(q0_prev, rcond=1e-1)

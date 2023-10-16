@@ -30,7 +30,7 @@ class LDDMMModel:
     #############################################################################################
     ### Constructor + various initialization functions
 
-    def __init__(self, sigma=1, D=2, lambd=1,
+    def __init__(self, sigma=1.0, D=2, lambd=2.0,
                  spec=defspec, gradcomponent=True, withlogdet=True, version=None,
                  usetrajcost=True, computversion="keops", scheme="Ralston", nonsupprev=False, nt=10):
 

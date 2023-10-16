@@ -34,7 +34,9 @@ def on_top(fig):
 # step=TODO if necessary
 
 def get_bounds(*xlist, **kwargs):
-    '''Automatic bounds extraction with a relative margin `relmargin` and an imposed multiple of `step`'''
+    '''Automatic bounds extraction with a relative margin `relmargin` and an imposed multiple of `step`.
+    :return: xmin,xmax,ymin,ymax
+    '''
 
     mins = torch.cat(tuple(xy.min(0).values.reshape(1, 2) for xy in xlist if len(xy) > 0), 0).min(0).values.numpy()
     maxs = torch.cat(tuple(xy.max(0).values.reshape(1, 2) for xy in xlist if len(xy) > 0), 0).max(0).values.numpy()
