@@ -213,7 +213,11 @@ class multiPSR:
         # nota: self.y is guaranteed to have no gradient attached (important for LDDMM QuadLoss below)
 
         # keep track of full free energy (to check that it only decreases!)
-        self.update_FE(message = f"GMM optimisation ({repeat} EM steps).")
+        message = f"GMM optim : {repeat} EM steps."
+        if self.GMMi[0].outliers:
+            p0 = 1 / (1 + np.exp(-self.GMMi[0].outliers["eta0"]))
+            message += f" p_outlier={p0:.4}"
+        self.update_FE(message = message)
 
 
     ################################################################
@@ -376,15 +380,17 @@ class diffPSR(multiPSR):
         :param rho: Relative coverage radius. The actual coverage radius is defined as
                 Rcover = rho * LMi.Kernel.sigma
 
-        :param scheme: "decim" or "grid".
+        :param scheme: "decim" or "grid" or "custom".
             If "decim", we pick LDDMM support points out of the full point sets, through a greedy decimation algorithm,
             ensuring that the support points cover the full point sets with a covering radius of Rcover =rho*sigma.
             If "grid", we pick LDDMM support points on a grid, with bounds given by data, and grid step size given by Rcover = rho*sigma.
             Alternatively, grid location can be set by hand, by providing lists xticks and yticks. (If provided, these
             options override the value of "rho" parameter, which becomes useless.)
+            If "custom", the location of support points are provided by hand in torch tensor q0.
 
-        :param xticks: list or 1d array. If provided, imposes the X coordinates of the support grid (overriding "rho" parameter).
-        :param yticks: list or 1d array. If provided, imposes the Y coordinates of the support grid (overriding "rho" parameter).
+        :param xticks: list or 1d array. X coordinates of the support grid when scheme="grid" (overrides "rho" parameter).
+        :param yticks: idem for Y coordinates of the support grid.
+        :param q0: custom location of support points, when scheme = "custom"
         '''
 
         self.rho = rho

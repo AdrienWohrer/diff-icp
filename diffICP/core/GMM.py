@@ -38,7 +38,7 @@ from diffICP.visualization.visu import get_bounds, my_scatter
 
 class GaussianMixtureUnif(Module):
 
-    def __init__(self, mu, spec=defspec, computversion="keops"):
+    def __init__(self, mu, use_outliers=False, spec=defspec, computversion="keops"):
         '''
         Gaussian Mixture Model with uniform isotropic covariances sigma^2*Id
 
@@ -65,7 +65,9 @@ class GaussianMixtureUnif(Module):
         This is the basic initialization function. Many other parameters (self.to_optimize, self.outliers, etc.) can be set afterwards, see comments in the code.
 
         :param mu:  initial emplacement of centroids (mu.shape[0] thus provides the -fixed- number of Gaussian components)
+        :param use_outliers: set at True to add handling of outliers. (Can also be done afterwards, by modifying self.outliers.)
         :param spec:  dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
+        :param computversion: "keops" or "torch"
         '''
 
         super(GaussianMixtureUnif, self).__init__()			# https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
@@ -77,18 +79,19 @@ class GaussianMixtureUnif(Module):
         r = self.mu.var(0).sum().sqrt().item()              # "typical radius" of the cloud of centroids. Hence, each centroid takes a "typical volume" r^D/C
         self.sigma = 0.1 * (r / self.C**(1/self.D))         # 0.1 times the "typical radius" of each centroid
         self.w = torch.zeros(self.C, **spec)                # w_c = "score" de chaque composante. Son poids est pi_c = exp(w_c) / sum_{c'} exp(w_{c'})
-        self.to_optimize = {                    # (To set afterwards, externally, if required)
+        self.to_optimize = {                    # (Can be modified afterwards, externally, if required)
             "sigma" : True,
             "mu" : True,
             "w" : True,
             "eta0" : True                       # Optimize outlier log-odds-ratio, if an outlier scheme is used
         }
-
-        # self.outliers = None      # For a model with no outlier component
-        self.outliers = {           # (Can be modified afterwards, externally, if required)
-            "vol0" : None,          # Reference volume of the 'outlier' distribution (if 'None', fixed automatically at first call to E_step)
-            "eta0" : 0.0            # (Initial) value of log-odds-ratio for 'outlier' vs. "GMM"
-        }
+        if use_outliers:
+            self.outliers = {                   # (Can also be modified afterwards, externally, if required)
+                "vol0": None,   # Reference volume of the outlier distribution (if 'None', fixed automatically at first call to E_step)
+                "eta0": 0.0     # (Initial) value of log-odds-ratio for "outlier vs. GMM"
+            }
+        else:
+            self.outliers = None                # Model with no outlier component
 
         self.set_computversion(computversion)
 
@@ -97,7 +100,7 @@ class GaussianMixtureUnif(Module):
         '''
         Custom deepcopy = copy GMM parameters.
         '''
-        G2 = GaussianMixtureUnif(self.mu, self.spec, self.computversion)
+        G2 = GaussianMixtureUnif(self.mu, spec=self.spec, computversion=self.computversion)
         G2.sigma = self.sigma
         G2.w = self.w.clone().detach()
         G2.to_optimize = copy.deepcopy(self.to_optimize)
@@ -251,7 +254,7 @@ class GaussianMixtureUnif(Module):
             self.mu = softmax(lgamma_nc,dim=0).t() @ X      # shape (C,2)
 
         if self.outliers is not None and self.to_optimize["eta0"]:
-            self.outliers["eta0"] = lgamma0_n.logsumexp(dim=0) - lgammaT_n.logsumexp(dim=0)       # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
+            self.outliers["eta0"] = (lgamma0_n.logsumexp(dim=0) - lgammaT_n.logsumexp(dim=0)).item()     # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
 
         if self.to_optimize["w"]:
             self.w = lgamma_nc.logsumexp(dim=0)                             # exp(w_c) = sum_n gamma_{nc} [GMM score without outliers]
@@ -308,7 +311,7 @@ class GaussianMixtureUnif(Module):
 
             X = X.detach()                                                      # to be sure
             D2_nc = Vi(X).sqdist(Vj(self.mu))                                   # Quadratic distances (symbolic Keops matrix)
-            loggaussnorm = torch.tensor(self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi)), **self.spec)
+            loggaussnorm = torch.tensor([self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi))], **self.spec)
             Zw = self.w.logsumexp(dim=0)
             t_nc = Vj(self.w.view(self.C, 1)) - D2_nc / (2 * self.sigma ** 2) - Zw - loggaussnorm   # exp(t_nc) = pi_c * P(x_n|cluster_c)
             T_n = t_nc.logsumexp(axis=1)                                                            # exp(T_n) = sum_c exp(t_nc) ; "total component score"
@@ -347,7 +350,7 @@ class GaussianMixtureUnif(Module):
                 self.w = h_c.view(self.C)               # (w = h_c + arbitrary constant, chosen here as 0)
 
             if self.outliers is not None and self.to_optimize["eta0"]:
-                self.outliers["eta0"] = lgam0_n.logsumexp(dim=0) - lgamT_n.logsumexp(dim=0)  # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
+                self.outliers["eta0"] = (lgam0_n.logsumexp(dim=0) - lgamT_n.logsumexp(dim=0)).item()  # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
 
             if self.to_optimize["sigma"]:
                 D2_nc = Vi(X).sqdist(Vj(self.mu))  # Quadratic distances (symbolic Keops matrix)
@@ -651,14 +654,13 @@ if __name__ == '__main__':
 
         C = 10
         mu0 = x[torch.randint(0,N,(C,)),:]
-        GMM = GaussianMixtureUnif(mu0)
+        GMM = GaussianMixtureUnif(mu0, use_outliers=False)
         GMM.to_optimize = {
             "mu" : True,
             "sigma" : True,
             "w" : True,
             "eta0" : True
         }
-        GMM.outliers = None
         n = 0
         start = time.time()
         while n<1000:
@@ -712,7 +714,7 @@ if __name__ == '__main__':
         reglines = gridlines.register(reg, backward=True)
 
         ### Apply registration to GMM model
-        GMM = GaussianMixtureUnif(mu0=torch.tensor([[0.8,0.4],[0.2,0.5],[0.5,0.6]],**defspec))
+        GMM = GaussianMixtureUnif(mu0=torch.tensor([[0.8,0.4],[0.2,0.5],[0.5,0.6]]))
         GMM.sigma = 0.1
         GMM.w = torch.tensor([0,0.5,1],**defspec)
         plt.figure()
