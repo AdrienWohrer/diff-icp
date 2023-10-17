@@ -10,6 +10,7 @@ Gaussian Mixture Model functionalities. Adaptation of the GaussianMixture presen
 
 import copy, math, time
 import importlib.util
+import warnings
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -33,15 +34,11 @@ from diffICP.visualization.visu import get_bounds, my_scatter
 
 #####################################################################################
 #####################################################################################
-###
-### _basic version : does not use KeOps, so in theory it can also be used in Windows
-###
-#####################################################################################
 #####################################################################################
 
-class GaussianMixtureUnif_basic(Module):
+class GaussianMixtureUnif(Module):
 
-    def __init__(self, mu, spec=defspec):
+    def __init__(self, mu, spec=defspec, computversion="keops"):
         '''
         Gaussian Mixture Model with uniform isotropic covariances sigma^2*Id
 
@@ -71,7 +68,7 @@ class GaussianMixtureUnif_basic(Module):
         :param spec:  dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
         '''
 
-        super(GaussianMixtureUnif_basic, self).__init__()			# https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
+        super(GaussianMixtureUnif, self).__init__()			# https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
 
         self.params = {}
         self.spec = spec
@@ -80,23 +77,72 @@ class GaussianMixtureUnif_basic(Module):
         r = self.mu.var(0).sum().sqrt().item()              # "typical radius" of the cloud of centroids. Hence, each centroid takes a "typical volume" r^D/C
         self.sigma = 0.1 * (r / self.C**(1/self.D))         # 0.1 times the "typical radius" of each centroid
         self.w = torch.zeros(self.C, **spec)                # w_c = "score" de chaque composante. Son poids est pi_c = exp(w_c) / sum_{c'} exp(w_{c'})
-        self.to_optimize = {                # (To set afterwards, externally, if required)
+        self.to_optimize = {                    # (To set afterwards, externally, if required)
             "sigma" : True,
             "mu" : True,
             "w" : True,
-            "eta0" : True                     # Optimize outlier log-odds-ratio, if an outlier scheme is used
+            "eta0" : True                       # Optimize outlier log-odds-ratio, if an outlier scheme is used
         }
-        self.outliers = None
-        # self.outliers = {                   # To set afterwards, externally, if required
-        #     "vol0" : None,                  # Reference volume of the 'outlier' distribution
-        #     "eta0" : 0.0                    # (Initial) value of log-odds-ratio for 'outlier' vs. "GMM"
-        # }
+
+        # self.outliers = None      # For a model with no outlier component
+        self.outliers = {           # (Can be modified afterwards, externally, if required)
+            "vol0" : None,          # Reference volume of the 'outlier' distribution (if 'None', fixed automatically at first call to E_step)
+            "eta0" : 0.0            # (Initial) value of log-odds-ratio for 'outlier' vs. "GMM"
+        }
+
+        self.set_computversion(computversion)
+
+    # ----------------------------------------
+    def __deepcopy__(self, memo):
+        '''
+        Custom deepcopy = copy GMM parameters.
+        '''
+        G2 = GaussianMixtureUnif(self.mu, self.spec, self.computversion)
+        G2.sigma = self.sigma
+        G2.w = self.w.clone().detach()
+        G2.to_optimize = copy.deepcopy(self.to_optimize)
+        G2.outliers = copy.deepcopy(self.outliers)
+        return G2
+
+    # ---------------------------------------
+
+    def set_computversion(self, version):
+        '''
+        Set computation version ('keops' or 'pytorch').
+        '''
+        if version == "keops" and not use_keops:
+            warnings.warn(
+                "Asked for keops kernel, but keops is not available on this machine. Switching to torch kernel.")
+            version = "torch"
+        # Aliases for the reductions (keops or torch version) :
+        if version == 'keops':
+            # KeOps versions : work even for large datasets
+            self.EM_step = self.EM_step_keops
+        elif version == "torch":
+            # PyTorch versions : faster on CPU + small datasets
+            self.EM_step = self.EM_step_torch
+        else:
+            raise ValueError(f"unkown computversion : {version}. Choices are 'keops' or 'torch'")
+        self.computversion = version
+
+    # ---------------------------------------
+
+    def set_vol0(self, X: torch.Tensor):
+        '''
+        Set a "reference volume" for outlier distribution, from the bounding box of given data points X.
+        :param X: torch.tensor of size (N,D) : data points
+        :return: None
+        '''
+        if self.outliers is not None:
+            self.outliers["vol0"] = (X.max(dim=0)[0]-X.min(dim=0)[0]).prod().item()
+
+    # ---------------------------------------
 
     def __str__(self):
         '''
         Printable summary string of the GMM's parameters.
         '''
-        s = super(GaussianMixtureUnif_basic, self).__str__()
+        s = super(GaussianMixtureUnif, self).__str__()
         s+= ": Gaussian Mixture with Uniform covariances. Parameters:\n"
         s+= "    C [# components] : "+str(self.C)+"\n"
         s+= "    sigma [unif. std] : " +str(self.sigma)+"\n"
@@ -104,9 +150,10 @@ class GaussianMixtureUnif_basic(Module):
         s+= "    w_c [component scores]:" +str(self.w)+"\n"
         if self.outliers is not None:
             s+= "    vol0 [ref. volume for outliers]:" +str(self.outliers["vol0"])+"\n"
-            s+= "    w0 [outlier vs GMM scores]:" +str(self.outliers["w0"])+"\n"
+            s+= "    eta0 [outlier vs GMM log-ratio]:" +str(self.outliers["eta0"])+"\n"
         return s
 
+    # -------------------------------------
 
     # Hack to ensure a correct value of spec when Unpickling. See diffICP.spec.CPU_Unpickler and
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
@@ -136,6 +183,7 @@ class GaussianMixtureUnif_basic(Module):
         return eta-Z, -Z
 
     # -------------------------------
+
     def log_responsibilities(self, X):
         '''
         Compute log-responsibilities (without outliers).
@@ -150,9 +198,10 @@ class GaussianMixtureUnif_basic(Module):
         return lgamma_nc
 
     # -------------------------------
-    def EM_step_pytorch(self, X):
+
+    def EM_step_torch(self, X):
         '''
-        EM_step function (pytorch version). Performs ONE alternation of (E step, M step) for fitting the GMM model to the data points X.
+        EM_step function (torch version). Performs ONE alternation of (E step, M step) for fitting the GMM model to the data points X.
 
         E step : compute (log)-responsibilities gamma_nc of each data points X_n to each GMM component c (plus outlier responsibilities if present).
 
@@ -190,6 +239,8 @@ class GaussianMixtureUnif_basic(Module):
         if self.outliers is not None:
             # In that case, gamma_nc above represent CONDITIONAL responsibilities, given that x_n is not an outlier.
             eta0 = self.outliers["eta0"]                 # eta0 = log(pi_0/1-pi_0) ; current outliers log-odds-ratio for GMM model
+            if self.outliers["vol0"] is None:
+                self.set_vol0(X)                         # (first call to E_step fixes vol0 if it was not precised)
             logJ0 = -np.log(self.outliers["vol0"])       # J0 = P(x|outlier) = 1 / vol0
             eta0_n = eta0 + logJ0 - T_n                                # outliers log-odds-ratio for EM responsibilities of component n
             lgamma0_n, lgammaT_n = self.log_ratio_to_proba(eta0_n)     # gamma0_n = outlier responsibility for component n ; gammaT_n = 1 - gamma0_n
@@ -232,22 +283,152 @@ class GaussianMixtureUnif_basic(Module):
         return Y, Cfe.item()
 
 
+    #####################################################################################
+    ###
+    ### KeOps implementation of the EM functions, if available (hopefully faster)
+    ###
+    #####################################################################################
+
+    # Same principle as above, but now responsibilities "lgam_nc" are a SYMBOLIC 2D LazyTensor, so we cannot access its
+    # value directly. Responsibilities are only available through the application of a reduction in either dimension :
+    #
+    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = lgam_nc.sumsoftmaxweight(stuff,axis=0)
+    #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = lgam_nc.sumsoftmaxweight(stuff,axis=1)
+    # or alternatively
+    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) )  with stuff > 0       --> res = lgam_nc.logsumexp(weight=stuff,axis=0).exp()
+
+    if use_keops:
+
+        def E_step_keops(self, X):
+            '''
+            E step (keops implementation). Compute component responsibilities, for current GMM model and given data points.
+            :param X: X: torch.tensor(N,D) - data points.
+            :return: lgam_nc [log responsibilities as a KeOps symbolic tensor], lgam0_n [outlier log-responsibilities], lgamT_n [=log(1-gam0_n))]
+            '''
+
+            X = X.detach()                                                      # to be sure
+            D2_nc = Vi(X).sqdist(Vj(self.mu))                                   # Quadratic distances (symbolic Keops matrix)
+            loggaussnorm = torch.tensor(self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi)), **self.spec)
+            Zw = self.w.logsumexp(dim=0)
+            t_nc = Vj(self.w.view(self.C, 1)) - D2_nc / (2 * self.sigma ** 2) - Zw - loggaussnorm   # exp(t_nc) = pi_c * P(x_n|cluster_c)
+            T_n = t_nc.logsumexp(axis=1)                                                            # exp(T_n) = sum_c exp(t_nc) ; "total component score"
+            lgam_nc = t_nc - Vi(T_n)                                                                # gamma_nc = exp(lgam_nc) ; sum_c gamma_nc = 1
+
+            if self.outliers is not None:
+                # In that case, gamma_nc above represent CONDITIONAL responsibilities, given that x_n is not an outlier.
+                eta0 = self.outliers["eta0"]                # eta0 = log(pi_0/1-pi_0) ; current outliers log-odds-ratio for GMM model
+                if self.outliers["vol0"] is None:
+                    self.set_vol0(X)                        # (first call to E_step fixes vol0 if it was not precised)
+                logJ0 = -np.log(self.outliers["vol0"])      # J0 = P(x|outlier) = 1 / vol0
+                eta0_n = eta0 + logJ0 - T_n                 # outliers log-odds-ratio for EM responsibilities of component n
+                lgam0_n, lgamT_n = self.log_ratio_to_proba(eta0_n)  # gamma0_n = outlier responsibility for component n ; gammaT_n = 1 - gamma0_n
+            else:
+                lgam0_n, lgamT_n = None, None
+
+            return lgam_nc, lgam0_n, lgamT_n
+
+        # ----------------------------------------------------------------
+
+        def M_step_keops(self, X, lgam_nc, lgam0_n=None, lgamT_n=None):
+            '''
+            Update GMM parameters, given data X and log-responsibilities lgam_nc (plus outlier responsibilities if present).
+            :param lgam_nc, lgam0_n, lgam_T : as produced by self.E_step_keops()
+            :return: None
+            '''
+
+            X = X.detach()  # to be sure
+            N = X.shape[0]
+
+            if self.to_optimize["mu"]:
+                self.mu = lgam_nc.sumsoftmaxweight(Vi(X), axis=0).reshape(self.C, self.D)
+
+            if self.to_optimize["w"]:
+                h_c = lgam_nc.logsumexp(axis=0)         # exp(h_c) = N_c = \sum_n gamma_{nc}  [GMM score without outliers]
+                self.w = h_c.view(self.C)               # (w = h_c + arbitrary constant, chosen here as 0)
+
+            if self.outliers is not None and self.to_optimize["eta0"]:
+                self.outliers["eta0"] = lgam0_n.logsumexp(dim=0) - lgamT_n.logsumexp(dim=0)  # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
+
+            if self.to_optimize["sigma"]:
+                D2_nc = Vi(X).sqdist(Vj(self.mu))  # Quadratic distances (symbolic Keops matrix)
+                # NDsigma2 = lgam_nc.sumsoftmaxweight(D2_nc, axis=1).sum()
+                NDsigma2 = lgam_nc.logsumexp(weight=D2_nc, axis=0).exp().sum()  # marginally faster (~= -10% when N=10000)
+                self.sigma = (NDsigma2 / (self.D * N)).sqrt().item()  # (.item() to return a simple float)
+
+        # ------------------------------------------------------------
+
+        def EM_values_keops(self, lgam_nc, lgam0_n=None, lgamT_n=None):
+            '''
+            Compute EM-related values : Y (quadratic targets) and Cfe (free energy offset)
+            :param lgam_nc, lgam0_n, lgam_T: as produced by self.E_step_keops()
+            :return: Y, Cfe
+            '''
+
+            # "Quadratic targets" Y(N,D)
+            N = lgam_nc.shape[0]
+            Y = lgam_nc.sumsoftmaxweight(Vj(self.mu), axis=1).reshape(N, self.D)
+
+            ### "Free energy offset" term (part of the free energy that does not depend directly on the points X)
+            # Without outliers:
+            #   Cfe = sum_n Cfe_n
+            #   Cfe_n = sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) -D/2*log(2pi) - log(pi_c) + log(gamma_{nc}) ]
+            # With outliers:
+            #   Cfe = sum_n [ (1-gamma0_n) [ Cfe_n + log(1-gamma0_n) - log(1-pi0)] + gamma0_n [ -logJ0 + log gamma0_n - log pi0 ] ]
+
+            lpi_c = (self.w - torch.logsumexp(self.w, 0)).view(self.C, 1)  # keops requires 2D
+            loggaussnorm = self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi))
+
+            Cfe_n_comp = lgam_nc.sumsoftmaxweight( Vj(self.mu).sqnorm2() / (2 * self.sigma ** 2) - Vi(Y).sqnorm2() / (2 * self.sigma ** 2)
+                                                       - Vj(lpi_c) + lgam_nc , axis=1) + loggaussnorm
+            if self.outliers is None:
+                Cfe = Cfe_n_comp.sum()
+            else:
+                gamma0_n = lgam0_n.exp()
+                gammaT_n = lgamT_n.exp()
+                lpi0, lpiT = self.log_ratio_to_proba(self.outliers["eta0"])
+                logJ0 = -np.log(self.outliers["vol0"])  # J0 = P(x|outlier) = 1 / vol0
+                Cfe = (gammaT_n * (Cfe_n_comp + lgamT_n - lpiT) + gamma0_n * (-logJ0 + lgam0_n - lpi0)).sum()
+
+            return Y, Cfe.item()  # .item() to return a simple float
+
+        # ---------------------------------------------------------------
+        # All three operations (E+M+compute Y and Cfe). Does the same thing as EM_step_torch().
+
+        def EM_step_keops(self, X):
+            '''
+            EM_step function (keops version). Performs ONE alternation of (E step, M step) for fitting the GMM model to the data points X.
+
+            E step : compute (log)-responsibilities gamma_nc of each data points X_n to each GMM component c (plus outlier responsibilities if present).
+
+            M step : update GMM parameters based on the new log-responsibilities.
+
+            This function updates the GMM's internal state + returns two quantities of potential interest, Y and Cfe (see below).
+
+            :param X: torch.tensor(N,D) - data points.
+            :return:
+              - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
+              - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values.
+            '''
+            log_gammas = self.E_step_keops(X)
+            self.M_step_keops(X, *log_gammas)
+            Y, Cfe = self.EM_values_keops(*log_gammas)
+            return Y, Cfe
+
+
     #####################################################################
     ###
     ### Other GMM functions
     ###
     #####################################################################
 
-    ### Return component weights
-
     def pi(self):
-        '''Return the vector of GMM component weights pi_c (instead of their log-scores w). Without outliers.'''
+        '''Return the vector of GMM component weights pi_c (without outliers).'''
         return softmax(self.w)
 
-    ### Produce a sample from the GMM distribution
+    # ------------------------------------------------
 
     def get_sample(self, N):
-        """Generates a sample of N points."""
+        '''Generate a random sample of N points from the GMM distribution.'''
         samp = self.sigma * torch.randn(N, self.D, **self.spec)     # random normal samples
         # center around (random) components
         c = torch.distributions.categorical.Categorical(logits=self.w).sample((N,))
@@ -255,16 +436,16 @@ class GaussianMixtureUnif_basic(Module):
             samp[n,:] += self.mu[c[n],:]
         return samp
 
-    ### PLOTTING FUNCTION (adapted from a KeOps tutorial)
+    # --------------------------------------------------
 
     def plot(self, *samples, bounds=None, heatmap=True, color=None, cmap=cm.RdBu, heatmap_amplification=-1, registration=None):
         """
         Displays the model in 2D (adapted from a KeOps tutorial).
         Boundaries for plotting can be specified in either of two ways :
-            (a) bounds = [xmin,xmax,ymin,max] provides hard-coded limits (primary used information if present)
-         or (b) *samples = list of points sets of size (?,2). In which case, the plotting boundaries are automatically
-                computed to match to extent of these point sets. (Note that the *actual* plotting of these point sets,
-                if required, must be performed externally.)
+
+        - bounds = [xmin,xmax,ymin,max] provides hard-coded limits (primary used information if present)
+
+        - samples = (possibly multiple) points sets of size (?,2). In which case, the plotting boundaries are automatically computed to match to extent of these point sets. (Note that the *actual* plotting of these point sets, if required, must be performed externally.)
         """
 
         ### bounds for plotting
@@ -348,11 +529,11 @@ class GaussianMixtureUnif_basic(Module):
             extent=(xmin, xmax, ymin, ymax),
         )
 
-    ### PLOTTING FUNCTION FOR DEMONSTRATION : EACH CLUSTER WITH A DIFFERENT COLOR (TODO)
+    # ----------------------------------------------------------------
 
-    def plot_demo(self, *samples, lgam_nc=None, bounds=None, cluster_colors=None):
+    def plot_bis(self, *samples, lgam_nc=None, bounds=None, cluster_colors=None):
         """
-        Displays the model in 2D (adapted from a KeOps tutorial), for demonstration.
+        Alternative plotting function in 2d, for demonstration.
         Each cluster is associated to a different color.
         Boundaries for plotting can be specified in either of two ways :
             (a) bounds = [xmin,xmax,ymin,max] provides hard-coded limits (primary used information if present)
@@ -392,10 +573,10 @@ class GaussianMixtureUnif_basic(Module):
         plt.pause(.1)
 
 
-    #####################################################################
-
-    ### Functions below are directly adapted from the original KeOps tutorial.
-    ### They are included because they are used in the plotting function above
+    # ----------------------------------------------------------------------
+    # Functions below are directly adapted from the original KeOps tutorial.
+    # They are included because they are used in the plot() function above
+    # ----------------------------------------------------------------------
 
     def update_covariances(self):   # actually, gamma = *inverse* covariance
         """Computes the full covariance matrices from the model's parameters."""
@@ -426,163 +607,19 @@ class GaussianMixtureUnif_basic(Module):
 
 
 
-#####################################################################################
-#####################################################################################
-###
-### _keops version : added KeOps functionalities if available (hopefully faster)
-###
-#####################################################################################
-#####################################################################################
-
-class GaussianMixtureUnif_keops(GaussianMixtureUnif_basic):
-
-    ### KeOps implementation of the EM functions
-    ############################################
-
-    # Same principle as above, but now responsibilities "lgam_nc" are a SYMBOLIC 2D LazyTensor, so we cannot access its
-    # value directly. Responsibilities are only available through the application of a reduction in either dimension :
-    #
-    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) ) / sum_n gamma_{nc}   --> res = lgam_nc.sumsoftmaxweight(stuff,axis=0)
-    #   res_n = sum_c ( gamma_{nc}*stuff(n,c) )                      --> res = lgam_nc.sumsoftmaxweight(stuff,axis=1)
-    # or alternatively
-    #   res_c = sum_n ( gamma_{nc}*stuff(n,c) )  with stuff > 0       --> res = lgam_nc.logsumexp(weight=stuff,axis=0).exp()
-
-
-    ### E step : Compute log-responsibilities (returned as a symbolic keops LazyTensor).
-    # TODO write docstring
-
-    def E_step_keops(self, X):
-
-        X = X.detach()                                                      # to be sure
-        D2_nc = Vi(X).sqdist(Vj(self.mu))                                   # Quadratic distances (symbolic Keops matrix)
-        loggaussnorm = torch.tensor(self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi)), **self.spec)
-        Zw = self.w.logsumexp(dim=0)
-        t_nc = Vj(self.w.view(self.C, 1)) - D2_nc / (2 * self.sigma ** 2) - Zw - loggaussnorm   # exp(t_nc) = pi_c * P(x_n|cluster_c)
-        T_n = t_nc.logsumexp(axis=1)                                                            # exp(T_n) = sum_c exp(t_nc) ; "total component score"
-        lgam_nc = t_nc - Vi(T_n)                                                                # gamma_nc = exp(lgam_nc) ; sum_c gamma_nc = 1
-
-        if self.outliers is not None:
-            # In that case, gamma_nc above represent CONDITIONAL responsibilities, given that x_n is not an outlier.
-            eta0 = self.outliers["eta0"]                # eta0 = log(pi_0/1-pi_0) ; current outliers log-odds-ratio for GMM model
-            logJ0 = -np.log(self.outliers["vol0"])      # J0 = P(x|outlier) = 1 / vol0
-            eta0_n = eta0 + logJ0 - T_n                 # outliers log-odds-ratio for EM responsibilities of component n
-            lgam0_n, lgamT_n = self.log_ratio_to_proba(eta0_n)  # gamma0_n = outlier responsibility for component n ; gammaT_n = 1 - gamma0_n
-        else:
-            lgam0_n, lgamT_n = None, None
-
-        return lgam_nc, lgam0_n, lgamT_n
-
-
-    ### "M step" : Update GMM parameters, given data X and log-responsibilities lgam_nc.
-    # Must also provide lgam0_n and lgamT_n (outlier / non outlier log responsibilities) is self.outliers is not None
-    # TODO write docstring
-
-    def M_step_keops(self, X, lgam_nc, lgam0_n=None, lgamT_n=None):
-
-        X = X.detach()  # to be sure
-        N = X.shape[0]
-
-        if self.to_optimize["mu"]:
-            self.mu = lgam_nc.sumsoftmaxweight(Vi(X), axis=0).reshape(self.C, self.D)
-
-        if self.to_optimize["w"]:
-            h_c = lgam_nc.logsumexp(axis=0)         # exp(h_c) = N_c = \sum_n gamma_{nc}  [GMM score without outliers]
-            self.w = h_c.view(self.C)               # (w = h_c + arbitrary constant, chosen here as 0)
-
-        if self.outliers is not None and self.to_optimize["eta0"]:
-            self.outliers["eta0"] = lgam0_n.logsumexp(dim=0) - lgamT_n.logsumexp(dim=0)  # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
-
-        if self.to_optimize["sigma"]:
-            D2_nc = Vi(X).sqdist(Vj(self.mu))  # Quadratic distances (symbolic Keops matrix)
-            # NDsigma2 = lgam_nc.sumsoftmaxweight(D2_nc, axis=1).sum()
-            NDsigma2 = lgam_nc.logsumexp(weight=D2_nc, axis=0).exp().sum()  # marginally faster (~= -10% when N=10000)
-            self.sigma = (NDsigma2 / (self.D * N)).sqrt().item()  # (.item() to return a simple float)
-
-    ### Compute EM-related values : Y (quadratic targets) and Cfe (free energy offset)
-
-    def EM_values_keops(self, lgam_nc, lgam0_n=None, lgamT_n=None):
-
-        # "Quadratic targets" Y(N,D)
-        N = lgam_nc.shape[0]
-        Y = lgam_nc.sumsoftmaxweight(Vj(self.mu), axis=1).reshape(N, self.D)
-
-        ### "Free energy offset" term (part of the free energy that does not depend directly on the points X)
-        # Without outliers:
-        #   Cfe = sum_n Cfe_n
-        #   Cfe_n = sum_c gamma_{nc} * [ (|mu_c|^2 - |y_n|^2)/(2*sig^2) + D*log(sig) -D/2*log(2pi) - log(pi_c) + log(gamma_{nc}) ]
-        # With outliers:
-        #   Cfe = sum_n [ (1-gamma0_n) [ Cfe_n + log(1-gamma0_n) - log(1-pi0)] + gamma0_n [ -logJ0 + log gamma0_n - log pi0 ] ]
-
-        lpi_c = (self.w - torch.logsumexp(self.w, 0)).view(self.C, 1)  # keops requires 2D
-        loggaussnorm = self.D * (np.log(self.sigma) + 0.5 * np.log(2 * math.pi))
-
-        Cfe_n_comp = lgam_nc.sumsoftmaxweight( Vj(self.mu).sqnorm2() / (2 * self.sigma ** 2) - Vi(Y).sqnorm2() / (2 * self.sigma ** 2)
-                                                   - Vj(lpi_c) + lgam_nc , axis=1) + loggaussnorm
-        if self.outliers is None:
-            Cfe = Cfe_n_comp.sum()
-        else:
-            gamma0_n = lgam0_n.exp()
-            gammaT_n = lgamT_n.exp()
-            lpi0, lpiT = self.log_ratio_to_proba(self.outliers["eta0"])
-            logJ0 = -np.log(self.outliers["vol0"])  # J0 = P(x|outlier) = 1 / vol0
-            Cfe = (gammaT_n * (Cfe_n_comp + lgamT_n - lpiT) + gamma0_n * (-logJ0 + lgam0_n - lpi0)).sum()
-
-        return Y, Cfe.item()  # .item() to return a simple float
-
-    ### All three operation (E+M+compute Y and Cfe). Kept for simplicity
-
-    def EM_step_keops(self, X):
-        log_gammas = self.E_step_keops(X)
-        self.M_step_keops(X, *log_gammas)
-        Y, Cfe = self.EM_values_keops(*log_gammas)
-        return Y, Cfe
-
-
-#####################################################################################
-#####################################################################################
-###
-### Actual version used : GaussianMixtureUnif. _pytorch or _keops version depending on availability
-###
-#####################################################################################
-#####################################################################################
-
-# TODO switch to a custom handling of torch/keops, as in kernel.py
-
-if use_keops:
-    class GaussianMixtureUnif(GaussianMixtureUnif_keops):
-        EM_step = GaussianMixtureUnif_keops.EM_step_keops
-
-        # Custom deepcopy = copy GMM
-        def __deepcopy__(self, memo):
-            G2 = GaussianMixtureUnif(self.mu, self.spec)
-            G2.sigma = self.sigma
-            G2.w = self.w.clone().detach()
-            G2.to_optimize = copy.deepcopy(self.to_optimize)
-            return G2
-
-else:
-    class GaussianMixtureUnif(GaussianMixtureUnif_basic):
-        EM_step = GaussianMixtureUnif_basic.EM_step_pytorch
-
-        # Custom deepcopy = copy GMM (ugly to copy code twice, but heck...)
-        def __deepcopy__(self, memo):
-            G2 = GaussianMixtureUnif(self.mu, self.spec)
-            G2.sigma = self.sigma
-            G2.w = self.w.clone().detach()
-            G2.to_optimize = copy.deepcopy(self.to_optimize)
-            return G2
-
-
+############################################################################################
 ############################################################################################
 ###
 ### Test
 ###
+############################################################################################
 ############################################################################################
 
 if __name__ == '__main__':
     # Running as a script
 
     ### Test EM functions
+
     if True:
 
         plt.ion()
@@ -605,7 +642,7 @@ if __name__ == '__main__':
         xmin, xmax, ymin, ymax = get_bounds(x)
 
         # Add outliers
-        N_outliers = 300
+        N_outliers = 100
         outliers = torch.tensor([xmin, ymin])[None, :] + torch.tensor([xmax - xmin, ymax - ymin])[None, :] * torch.rand(N_outliers, 2)
         x = torch.cat((x, outliers), dim=0)
         x = x[torch.randperm(x.shape[0])]  # mix point order (to be sure)
@@ -621,10 +658,10 @@ if __name__ == '__main__':
             "w" : True,
             "eta0" : True
         }
-        GMM.outliers = {"vol0": (xmax-xmin)*(ymax-ymin), "eta0": 0.0}
+        GMM.outliers = None
         n = 0
         start = time.time()
-        while n<100:
+        while n<1000:
             n+=1
             print(n)
             plt.clf()
@@ -642,7 +679,8 @@ if __name__ == '__main__':
 
             GMM.EM_step(x)
             # GMM.EM_step_pytorch(x)
-            print(f"Outlier weight: {GMM.log_ratio_to_proba(GMM.outliers['eta0'])[0].exp().item()}" )
+            if GMM.outliers:
+                print(f"Outlier weight: {GMM.log_ratio_to_proba(GMM.outliers['eta0'])[0].exp().item()}" )
     #        print(GMM)
     #        input()
 
@@ -652,6 +690,7 @@ if __name__ == '__main__':
         print(f"Done. Total time : {time.time()-start}")
 
     ### Test plotting function with registration (experimental!)
+
     if False:
 
         plt.ion()
@@ -685,8 +724,8 @@ if __name__ == '__main__':
         plt.pause(.1)
         input()
 
-
     ### Basic K-means demo
+
     if False:
 
         plt.ion()
@@ -712,7 +751,7 @@ if __name__ == '__main__':
             print(n)
             plt.clf()
 
-            GMM.plot_demo(x)
+            GMM.plot_bis(x)
             input()
 
             GMM.EM_step(x)
