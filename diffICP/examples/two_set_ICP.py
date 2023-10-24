@@ -25,7 +25,7 @@ import torch
 from diffICP.core.GMM import GaussianMixtureUnif
 from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.affine import AffineModel
-from diffICP.core.PSR import diffPSR, affinePSR
+from diffICP.core.PSR import DiffPSR, AffinePSR
 from diffICP.visualization.visu import my_scatter, get_bounds, on_top
 from diffICP.tools.spec import defspec
 from diffICP.visualization.grid import Gridlines
@@ -101,9 +101,9 @@ else:
 
 ### And thus : full Point Set Registration algorithm
 if not use_diffPSR:
-    PSR = affinePSR(xB, GMMi, AffMi)
+    PSR = AffinePSR(xB, GMMi, AffMi)
 else:
-    PSR = diffPSR(xB, GMMi, LMi)
+    PSR = DiffPSR(xB, GMMi, LMi)
     if rho is not None:
         PSR.set_support_scheme("decim", rho)
 

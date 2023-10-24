@@ -20,7 +20,7 @@ plt.ion()
 # Import from diffICP module
 
 from diffICP.core.LDDMM import LDDMMModel
-from diffICP.core.PSR import diffPSR, affinePSR
+from diffICP.core.PSR import DiffPSR, AffinePSR
 from diffICP.visualization.visu import my_scatter
 from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
 
@@ -100,7 +100,7 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
 # PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.2, Rcoverwarning=1)
 # New version !
-PSR = diffPSR(x0, GMMg, LMi)
+PSR = DiffPSR(x0, GMMg, LMi)
 # Add a decimation scheme ?
 PSR.set_support_scheme("grid", rho=np.sqrt(2))
 # PSR.set_support_scheme("decim", rho=0.7)
@@ -129,9 +129,9 @@ for it in range(nIter):
     ### Store stuff (for saving results to file)
     # param_evol[version][it] = current a0 tensor(N,2)
 
-    if isinstance(PSR, diffPSR):
+    if isinstance(PSR, DiffPSR):
         par = {'a0':PSR.a0[0].cpu()}
-    elif isinstance(PSR, affinePSR):
+    elif isinstance(PSR, AffinePSR):
         par = {'M':PSR.M[0].cpu(), 't':PSR.t[0].cpu()}
     par['sigma'] = PSR.GMMi[0].sigma
     param_evol.append(par)
@@ -154,7 +154,7 @@ for it in range(nIter):
         my_scatter(PSR.GMMi[0].mu, alpha=.6, color="b")
         my_scatter(x1, alpha=.6, color="r")
         PSR.plot_trajectories(color='red')
-        if isinstance(PSR,diffPSR) and PSR.support_scheme:
+        if isinstance(PSR, DiffPSR) and PSR.support_scheme:
             # also visualize support trajectories in brown
             PSR.plot_trajectories(color='brown', support=True, linewidth=2, alpha=1)
         #plt.show()

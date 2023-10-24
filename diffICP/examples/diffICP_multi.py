@@ -19,7 +19,7 @@ torch.random.manual_seed(1234)
 
 from diffICP.core.GMM import GaussianMixtureUnif
 from diffICP.core.LDDMM import LDDMMModel
-from diffICP.core.PSR import diffPSR
+from diffICP.core.PSR import DiffPSR
 from diffICP.visualization.visu import my_scatter
 from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
 
@@ -96,7 +96,7 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
 
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
 # PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
-PSR = diffPSR(x0, GMMi, LMi)
+PSR = DiffPSR(x0, GMMi, LMi)
 # Add a support point scheme ?
 PSR.set_support_scheme("decim", rho=0.7)
 # PSR.set_support_scheme("grid", rho=1.0)
@@ -124,7 +124,7 @@ for it in range(nIter):
     # a0_evol[it][k] = current a0 tensor(Nk[k],2)
 
     GMMi_evol.append( copy.deepcopy( PSR.GMMi[0] ) )
-    if isinstance(PSR, diffPSR):
+    if isinstance(PSR, DiffPSR):
         a0_evol.append( [ a0k.clone().detach().cpu() for a0k in PSR.a0 ] ) # only in diffPSR case
 
     ### EM step for GMM model

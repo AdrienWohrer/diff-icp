@@ -19,7 +19,7 @@ torch.random.manual_seed(1234)
 
 from diffICP.core.GMM import GaussianMixtureUnif
 from diffICP.core.LDDMM import LDDMMModel
-from diffICP.core.PSR import diffPSR
+from diffICP.core.PSR import DiffPSR
 from diffICP.visualization.visu import my_scatter
 
 ###################################################################
@@ -163,7 +163,7 @@ LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
                           version = "logdet")   # "logdet", "classic" or "hybrid"
 
 # Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
+PSR = DiffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
 # PSR = diffPSR(x0, GMMi, LMi, Rdecim=None)
 
 ### Point Set Registration model : affine version
@@ -185,7 +185,7 @@ for it in range(nIter):
     # a0_evol[version][it][k] = current a0 tensor(Nk[k],2)
 
     GMMi_evol.append( [ copy.deepcopy( PSR.GMMi[s] ) for s in range(S) ] )
-    if isinstance(PSR, diffPSR):
+    if isinstance(PSR, DiffPSR):
         a0_evol.append( [ a0k.clone() for a0k in PSR.a0 ] )
 
     ### EM step for GMM model

@@ -85,7 +85,6 @@ class AffineModel:
     #
     # return the optimal M (given required constraints) and t (if with_t=True)
     # TODO switch to KeOps if required (faster?). For the moment, plain pytorch
-    # TODO implement missing version : affine with logdet
 
     def Optimize(self, X, Y, z, w=None):
 
@@ -113,8 +112,6 @@ class AffineModel:
 
         if self.version == 'rigid' or self.version == 'similarity':
             # Constraint M'*M=Id (rigid) or lam^2*Id (similarity) ---> SVD solution (see my notes)
-            # U, _, V = torch.svd(B, some=False)             # Pytorch 1.7 version
-            # Vh = V.t()                                     # transpose (CAUTION when changing Pytorch version!)
             U, _, Vh = torch.linalg.svd(B)                  # Pytorch 2.0 version
             # print(f"SVD check : {torch.norm(B - U@torch.diag(_)@Vh)}")
             D = torch.eye(self.D, **spec)
@@ -135,14 +132,30 @@ class AffineModel:
             M = lam * R
 
         elif self.version == 'affine':
+            A = Xc.t() @ (z[:,None] * Xc)
             if not self.withlogdet:
                 # M = B / (X'*X) : classic (unconstrained) least square
-                A = Xc.t() @ (z[:,None] * Xc)
-                # M = B @ torch.inverse(A)         # Pytorch 1.7 (=old) version
-                M = torch.linalg.solve(A,B,left=False)         # Pytorch 2.0 (=new) version (not tested)
+                M = torch.linalg.solve(A,B,left=False)         # Pytorch 2.0 version for M = B/A
             else:
-                raise NotImplementedError("General affine registration with term '-c*logdet(M)' not implemented.\n"
-                                          "Should find M to minimize E(M) = Tr(A*M*M') - 2*Tr(B'*M) - c*logdet(M)")
+                # To minimize :                 E(M) = Tr(A*M'*M) - 2*Tr(B'*M) - c*logdet(M)
+                # After differentiation :       2*M*A - 2*B - c*M'^{-1} = 0
+                # Easy reworking :              2*M*A*M' - (B*M'+M*B') - c*I = 0   and also   B*M' = M*B' (important!)
+                # Complete the square :         2*(M-K)*A*(M-K)' - B*K' - c*I = 0  with K:= B*A^{-1}/2
+                # And thus :                    (M-K)*A*(M-K)' = F  with F:= (B*K' + c*I)/2
+                K = 0.5*torch.linalg.solve(A,B,left=False)
+                F = 0.5*(B@K.t() + c*torch.eye(self.D, **spec))
+                F = 0.5*(F+F.t())               # (to be sure it's symmetric)
+
+                # Let Ar (any) square root of A and Fr (any) square root of F
+                # Solving previous equation:    M = K + Fr*Q*Ar^{-1}    with Q an orthonormal matrix to be determined
+                # Reinjecting B*M'=M*B' :       W*Q = Q'*W'             with W:= Ar'*B^{-1}*Fr
+                # Classic solution :            Q = V*U'                with SVD decomposition W = U*D*V'
+                Ar = torch.linalg.cholesky(A)      # Ar*Ar' = A
+                Fr = torch.linalg.cholesky(F)      # Fr*Fr' = F
+                W = Ar.t() @ torch.linalg.inv(B) @ Fr
+                U, _, Vh = torch.linalg.svd(W)
+                Q = (U@Vh).t()
+                M = K + Fr @ Q @ torch.linalg.inv(Ar)
 
         else:   # version = 'translation'
             M = torch.eye(self.D, **spec)

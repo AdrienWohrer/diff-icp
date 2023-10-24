@@ -26,7 +26,7 @@ from diffICP.visualization.visu import get_bounds       # (recycled for grid bou
 
 #######################################################################
 ###
-### Base class multiPSR : multiple Point Set Registration algorithms
+### Base class MultiPSR : multiple Point Set Registration algorithms
 ###
 #######################################################################
 
@@ -39,7 +39,7 @@ from diffICP.visualization.visu import get_bounds       # (recycled for grid bou
 #        PSR.GMM_opt(repeat=10)
 #        PSR.Reg_opt(tol=1e-5)
 
-class multiPSR:
+class MultiPSR:
 
     ###################################################################
 
@@ -124,7 +124,7 @@ class multiPSR:
         self.Cfe = [None] * self.S                              # updated after GMM_opt
         self.regloss = [0] * self.K                             # updated after Reg_opt
         self.quadloss = np.zeros((self.K,self.S))               # updated both after GMM_opt and Reg_opt
-        self.last_FE = None                                     # keep a trace of previous value of free energy (for debug)
+        self.FE = None                                          # keep a trace of current value of free energy
 
         # Store last shoot for each frame (for plotting, etc.)
         self.shoot = [None] * self.K
@@ -180,15 +180,15 @@ class multiPSR:
 
         FE = sum(self.Cfe) + sum(self.regloss) + self.quadloss.sum().item()
         print(message.ljust(70)+f"Total free energy = {FE:.8}")
-        if self.last_FE is not None and FE > self.last_FE:
+        if self.FE is not None and FE > self.FE:
             print("WARNING: measured increase in free energy ! Should not happen.")
-        self.last_FE = FE
+        self.FE = FE
 
 
     ################################################################
     ################################################################
 
-    def GMM_opt(self, repeat=1):
+    def GMM_opt(self, max_iterations=100, tol=1e-5):
         '''
         Partial optimization function, GMM part (for each structure s in turn).
         '''
@@ -196,10 +196,10 @@ class multiPSR:
         for s in range(self.S):
             allx1s = torch.cat(tuple(self.x1[:,s]), dim=0).to(**self.compspec)
 
-            for i in range(repeat):
-                # Possibly repeat several GMM loops on every iteration (since it's faster than LDDMM)
-                # TODO : use convergence criterion instead of hard coded repeat number
-                allys, self.Cfe[s] = self.GMMi[s].EM_step(allx1s)
+            allys, self.Cfe[s], _, i = self.GMMi[s].EM_optimization(allx1s, max_iterations=max_iterations, tol=tol)
+            # for i in range(repeat):
+            #     # Possibly repeat several GMM loops on every iteration (since it's faster than LDDMM)
+            #     allys, self.Cfe[s] = self.GMMi[s].EM_step(allx1s)
 
             # re-assign targets to corresponding frames
             last = 0
@@ -210,14 +210,16 @@ class multiPSR:
                 # update quadratic losses
                 self.update_quadloss(k,s)
 
-        # nota: self.y is guaranteed to have no gradient attached (important for LDDMM QuadLoss below)
+            # nota: self.y is guaranteed to have no gradient attached (important for LDDMM QuadLoss below)
 
-        # keep track of full free energy (to check that it only decreases!)
-        message = f"GMM optim : {repeat} EM steps."
-        if self.GMMi[0].outliers:
-            p0 = 1 / (1 + np.exp(-self.GMMi[0].outliers["eta0"]))
-            message += f" p_outlier={p0:.4}"
-        self.update_FE(message = message)
+            # keep track of full free energy (to check that it only decreases!)
+            message = f"GMM optim (structure {s}) : {i} EM steps"
+            if self.GMMi[s].outliers:
+                p0 = 1 / (1 + np.exp(-self.GMMi[s].outliers["eta0"]))
+                message += f", p_outlier={p0:.4}"
+            else:
+                message += "."
+            self.update_FE(message = message)
 
 
     ################################################################
@@ -242,9 +244,9 @@ class multiPSR:
         See registrations.py.
         '''
 
-        if isinstance(self, diffPSR):
+        if isinstance(self, DiffPSR):
             return LDDMMRegistration(self.LMi, self.q0[k], self.a0[k])
-        elif isinstance(self, affinePSR):
+        elif isinstance(self, AffinePSR):
             return AffineRegistration(self.AffMi, self.M[k], self.t[k])
 
 
@@ -270,7 +272,7 @@ class multiPSR:
             shoot = self.shoot[k]
 
         if shoot is None:  # must recompute
-            if isinstance(self, diffPSR):
+            if isinstance(self, DiffPSR):
                 if self.support_scheme:
                     shoot = self.LMi.Shoot(self.q0[k], self.a0[k], self.allx0[k])
                 else:
@@ -279,7 +281,7 @@ class multiPSR:
                 X = torch.cat(tuple(self.x0[k, :]), dim=0).to(**self.compspec)
                 shoot = self.AffMi.Shoot(self.M[k], self.t[k], X)
 
-        if isinstance(self,diffPSR) and self.support_scheme and not support:
+        if isinstance(self, DiffPSR) and self.support_scheme and not support:
             x = [tup[-1] for tup in shoot]   # plot "non-support" points of the shooting
         else:
             x = [tup[0] for tup in shoot]   # in every other case
@@ -291,13 +293,13 @@ class multiPSR:
 
 #######################################################################
 ###
-### Derived class diffPSR : multiPSR with diffeomorphic (LDDMM) registrations
+### Derived class DiffPSR : MultiPSR with diffeomorphic (LDDMM) registrations
 ###
 #######################################################################
 
-class diffPSR(multiPSR):
+class DiffPSR(MultiPSR):
     '''
-    multiPSR algorithm with diffeomorphic (LDDMM) registrations.
+    MultiPSR algorithm with diffeomorphic (LDDMM) registrations.
     '''
 
     def __init__(self, x, GMMi: GaussianMixtureUnif, LMi: LDDMMModel, dataspec=defspec, compspec=defspec):
@@ -307,7 +309,7 @@ class diffPSR(multiPSR):
             x[k] = torch tensor of size (N[k], D) : point set from frame k;
             x[k][s] = torch tensor of size (N[k,s], D) : point set in structure s from frame k;
 
-        :param LMi: LLDDMM model (and parameters) used in the algorithm, as provided in class LDDMMModel. See LDDMM_logdet.py
+        :param LMi: LLDDMM model (and parameters) used in the algorithm, as provided in class LDDMMModel. See LDDMM.py
 
         :param GMMi: GMM model (and parameters) used in the algorithm. Two possible formats:
             GMMi = single GMM model (for a single structure);
@@ -340,8 +342,7 @@ class diffPSR(multiPSR):
         self.support_scheme, self.rho = None, None
         self.q0 = self.allx0
 
-        # Initial LDDMM momenta a0[k] (nota: all structures s are concatenated in a0[k])
-        # Start with zero speeds (which is NOT a0=0 in the logdet model!)
+        # Initial LDDMM momenta a0[k] at zero speeds (nota: all structures s are concatenated in a0[k])
         self.a0 = [None] * self.K
         self.initialize_a0()
         # self.initialize_a0(alpha=1e-3, version='ridge_keops')
@@ -351,6 +352,7 @@ class diffPSR(multiPSR):
     def initialize_a0(self, **v2p_args):
         '''
         Set initial momenta a0 corresponding (approximately) to zero speeds, given current support points q0.
+        (Note that this is NOT a0=0 if there is a logdet component.)
         '''
         for k in range(self.K):
             v0k_at_q0 = torch.zeros(self.q0[k].shape, **self.compspec)
@@ -520,11 +522,11 @@ class diffPSR(multiPSR):
 
 #######################################################################
 ###
-### Derived class affinePSR : multiPSR with affine (viz. euclidian, rigid) registrations
+### Derived class AffinePSR : MultiPSR with affine (viz. euclidian, rigid) registrations
 ###
 #######################################################################
 
-class affinePSR(multiPSR):
+class AffinePSR(MultiPSR):
     '''
     multiPSR algorithm with affine (viz. euclidian, rigid) registrations. That is,
         T(X) = X * M' + t'      with
@@ -564,14 +566,12 @@ class affinePSR(multiPSR):
         self.M = [torch.eye(self.D, **dataspec)] * self.K
         self.t = [torch.zeros(self.D, **dataspec)] * self.K
 
-
     ################################################################
     ################################################################
 
-    def Reg_opt(self, tol=1e-5):
+    def Reg_opt(self):
         '''
         Affine registration optimization function.
-        :param tol : relative tolerance for stopping (before nmax).
         '''
 
         for k in range(self.K):

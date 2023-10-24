@@ -210,12 +210,13 @@ class GaussianMixtureUnif(Module):
 
         M step : update GMM parameters based on the new log-responsibilities.
 
-        This function updates the GMM's internal state + returns two quantities of potential interest, Y and Cfe (see below).
+        This function updates the GMM's internal state + returns three quantities of potential interest, Y, Cfe and FE (see below).
 
         :param X: torch.tensor(N,D) - data points.
         :return:
           - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
-          - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values.
+          - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values ;
+          - FE (number) : updated free energy, FE = Cfe + sum_n (1-gamma0_n) * (x_n-y_n)**2 / (2*sigma**2)
         '''
 
         ### This is the plain _pytorch implementation. Reductions over either dimension (N or C) can be performed, e.g., as:
@@ -282,9 +283,39 @@ class GaussianMixtureUnif(Module):
             gamma0_n = lgamma0_n.exp()
             gammaT_n = lgammaT_n.exp()
             lpi0, lpiT = self.log_ratio_to_proba(self.outliers["eta0"])
-            Cfe = (gammaT_n * (Cfe_n_comp + lgammaT_n - lpiT) + gamma0_n * (-logJ0 + lgamma0_n - lpi0)).sum()
-        return Y, Cfe.item()
+            Cfe = (gammaT_n * (Cfe_n_comp + lgammaT_n - lpiT) + gamma0_n * (-logJ0 + lgamma0_n - lpi0)).sum().item()
 
+        FE = Cfe + (gammaT_n * ((X-Y)**2).sum(-1)).sum().item() / (2*self.sigma**2)
+
+        return Y, Cfe, FE
+
+
+    # -------------------------------
+
+    def EM_optimization(self, X, max_iterations=100, tol=1e-5):
+        '''
+        Iterated EM optimization of the model on the data points X.
+
+        :param X: torch.tensor(N,D) - data points.
+        :param max_iterations: maximum number of EM steps before break.
+        :param tol: (relative) numerical tolerance on EM free energy for break.
+
+        :return:
+          - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
+          - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values ;
+          - FE (number) : updated free energy, FE = Cfe + sum_n (1-gamma0_n) * (x_n-y_n)**2 / (2*sigma**2) ;
+          - i (number) : required number of EM iterations
+        '''
+
+        Y, Cfe, FE, last_FE = None, None, None, None
+        for i in range(max_iterations):
+            Y, Cfe, FE = self.EM_step(X)
+            if last_FE is not None and tol is not None and abs(FE-last_FE) < tol * abs(last_FE):
+                print(f"GMM optimization - reached required tolerance of {tol} in {i+1} EM steps")
+                return Y, Cfe, FE, i+1
+            last_FE = FE
+        print(f"GMM optimization - reached maximum number of iterations : {max_iterations}")
+        return Y, Cfe, FE, i+1
 
     #####################################################################################
     ###
@@ -364,7 +395,9 @@ class GaussianMixtureUnif(Module):
             '''
             Compute EM-related values : Y (quadratic targets) and Cfe (free energy offset)
             :param lgam_nc, lgam0_n, lgam_T: as produced by self.E_step_keops()
-            :return: Y, Cfe
+            :return:
+              - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
+              - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values
             '''
 
             # "Quadratic targets" Y(N,D)
@@ -390,9 +423,9 @@ class GaussianMixtureUnif(Module):
                 gammaT_n = lgamT_n.exp()
                 lpi0, lpiT = self.log_ratio_to_proba(self.outliers["eta0"])
                 logJ0 = -np.log(self.outliers["vol0"])  # J0 = P(x|outlier) = 1 / vol0
-                Cfe = (gammaT_n * (Cfe_n_comp + lgamT_n - lpiT) + gamma0_n * (-logJ0 + lgam0_n - lpi0)).sum()
+                Cfe = (gammaT_n * (Cfe_n_comp + lgamT_n - lpiT) + gamma0_n * (-logJ0 + lgam0_n - lpi0)).sum().item()
 
-            return Y, Cfe.item()  # .item() to return a simple float
+            return Y, Cfe
 
         # ---------------------------------------------------------------
         # All three operations (E+M+compute Y and Cfe). Does the same thing as EM_step_torch().
@@ -405,18 +438,24 @@ class GaussianMixtureUnif(Module):
 
             M step : update GMM parameters based on the new log-responsibilities.
 
-            This function updates the GMM's internal state + returns two quantities of potential interest, Y and Cfe (see below).
+            This function updates the GMM's internal state + returns three quantities of potential interest, Y, Cfe and FE (see below).
 
             :param X: torch.tensor(N,D) - data points.
             :return:
               - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
-              - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values.
+              - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values ;
+              - FE (number) : updated free energy, FE = Cfe + sum_n (1-gamma0_n) * (x_n-y_n)**2 / (2*sigma**2)
             '''
             log_gammas = self.E_step_keops(X)
             self.M_step_keops(X, *log_gammas)
             Y, Cfe = self.EM_values_keops(*log_gammas)
-            return Y, Cfe
+            if self.outliers is not None:
+                gammaT_n = log_gammas[2].exp()
+            else:
+                gammaT_n = 1
+            FE = Cfe + (gammaT_n * ((X - Y) ** 2).sum(-1)).sum().item() / (2 * self.sigma ** 2)
 
+            return Y, Cfe, FE
 
     #####################################################################
     ###
