@@ -25,16 +25,20 @@ Aside from the classics (scipy, numpy, matplotlib), Python modules **torch** and
 ### Contents
 
 Directory **diffICP/core** contains the core models. Mainly:
-  - *GMM.py* handles all Gaussian-Mixture-Model-related functions (e.g., EM algorithm for GMM clustering)
-  - *LDDMM_logdet.py* handles the diffeomorphic registration functions
+  - *GMM.py* handles all Gaussian-Mixture-Model-related functions (e.g., EM algorithm for GMM clustering).
+  - *LDDMM.py* handles the diffeomorphic registration functions.
   - *PSR.py* defines the full Point Set Registration algorithm, based on the interplay between the two above.
-  - *Affine_logdet.py* handles alternative registration functions based on affine (e.g., rigid, or more general linear) transformations. This can be used for comparison and/or preprocessing.
+  - *affine.py* handles alternative registration functions based on affine (e.g., rigid, or more general linear) transformations. This can be used for comparison and/or preprocessing.
+  - *PSR_standard.py* implements the 'standard' diffeomorphic Point Set Registration algorithm of Glaunès et al, for comparison.
 
-Directory **diffICP/examples** contains some use cases
+Directory **diffICP/examples** contains some use cases (somewhat obsolete now, better see **diffICP/atlas** and **diffICP/two_set** instead)
   - *diffICP_basic.py* illustrates registration of a single point set to a known GMM model (Fig. 1 of the GSI article)
   - *diffICP_multi.py* illustrates registration of multiple point sets to a common GMM model that is inferred from the data (Fig. 2 of the GSI article)
-  - *two_set_ICP.py* illustrates the classic ICP problem (for two point sets), both in linear and diffeomorphic forms
   - *diffICP_full.py* illustrates a full model with multiple frames (e.g., patients) *and* multiple GMM models (e.g., brain structures) (not documented in the GSI article)
+
+Directory **diffICP/atlas** contains user-friendly interfaces for building a groupwise point-set atlas, with various algorithms.
+
+Directory **diffICP/two_set** contains user-friendly interfaces for the two-point-set matching problem, with various algorithms.
 
 Directories **diffICP/tools** and **diffICP/visualization** contain a number of helper functions.
 

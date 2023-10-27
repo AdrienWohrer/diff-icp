@@ -4,7 +4,10 @@ Test the "standard" atlas construction with LDDMM, as provided by library Deform
     - Launch Deformetrica on these data, to build the "standard" atlas of the point sets
     - Retrieve the output of deformetrica in a PSR_std object
 
-Results should be compared to our own method diffICP atlas construction
+Results should be compared to our own method diffICP atlas construction.
+
+Nota : running this file as a script provides an example usage of the function.
+Else, simply import function deformetrica_atlas in other scripts to use it there.
 '''
 
 import copy

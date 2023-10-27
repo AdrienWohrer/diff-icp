@@ -1,5 +1,8 @@
 '''
 Affine ICP algorithm (à la Horaud-Evangelidis) on multiple point set registration (statistical atlas).
+
+Nota : running this file as a script provides an example usage of the function.
+Else, simply import function affineICP_atlas in other scripts to use it there.
 '''
 
 import time, copy

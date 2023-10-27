@@ -2,6 +2,9 @@
 Test the "standard" atlas construction with LDDMM, with a personal re-implementation.
 
 Results should be compared to our own method diffICP atlas construction.
+
+Nota : running this file as a script provides an example usage of the function.
+Else, simply import function standard_atlas in other scripts to use it there.
 '''
 
 import copy

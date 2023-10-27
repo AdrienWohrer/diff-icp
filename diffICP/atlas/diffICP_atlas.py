@@ -1,5 +1,8 @@
 '''
 Test the diffICP algorithm on multiple point set registration (statistical atlas).
+
+Nota : running this file as a script provides an example usage of the function.
+Else, simply import function diffICP_atlas in other scripts to use it there.
 '''
 
 import copy
