@@ -219,8 +219,10 @@ class MultiPSR:
                 message += f", p_outlier={p0:.4}"
             else:
                 message += "."
-            self.update_FE(message = message)
-
+            if self.FE is not None or s == self.S-1:        # (ugly)
+                self.update_FE(message = message)
+            else:
+                print(message)
 
     ################################################################
     ################################################################
@@ -428,7 +430,8 @@ class DiffPSR(MultiPSR):
 
         elif scheme == "custom":
             assert q0 is not None, "For a custom support scheme, please specify argument q0"
-            self.q0 = q0.clone().detach().to(**self.compspec).contiguous()
+            # For the moment : use same support points for all frames (TODO change if required)
+            self.q0 = [q0.clone().detach().to(**self.compspec).contiguous()] * self.K   # TODO not tested
 
         else:
             raise ValueError(f"Unknown value of support point scheme : {scheme}. Only values available are 'decim', 'grid' and 'custom'.")
@@ -517,7 +520,7 @@ class DiffPSR(MultiPSR):
                         warnings.warn("Uncovered points during LDDMM shooting. Choose a smaller rho when defining the support scheme.", RuntimeWarning)
 
             # Report for this frame, print full free energy (to check that it only decreases!)
-            self.update_FE(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change ={change:.4}.")
+            self.update_FE(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change={change:.4}.")
 
 
 #######################################################################

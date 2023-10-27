@@ -371,7 +371,8 @@ class LDDMMModel:
         q, _, _, x = shoot[-1]
         datal = dataloss(q, x).item()
 
-        # print("optim steps ", nsteps, " loss =", trajl+datal, " change =", change)
+        # print(p0, shoot, trajl, datal, nsteps, change)
+
         return p0, shoot, trajl, datal, nsteps, change
 
 

@@ -96,10 +96,7 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
                           version = "classic",          # "logdet", "classic" or "hybrid"
                           computversion="keops",        # "torch" or "keops"
                           scheme="Euler")               # "Euler" or "Ralston"
-# Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-# PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.7, Rcoverwarning=1)
-# PSR = diffPSR(x0, GMMg, LMi, Rdecim=0.2, Rcoverwarning=1)
-# New version !
+
 PSR = DiffPSR(x0, GMMg, LMi)
 # Add a decimation scheme ?
 PSR.set_support_scheme("grid", rho=np.sqrt(2))
@@ -107,8 +104,8 @@ PSR.set_support_scheme("grid", rho=np.sqrt(2))
 
 ### Point Set Registration model : affine version
 
-# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'similarity'))
-# PSR = affinePSR(x0, GMMg, AffineModel(D=2, version = 'euclidian', withlogdet=False))
+# PSR = AffinePSR(x0, GMMg, AffineModel(D=2, version = 'similarity'))
+# PSR = AffinePSR(x0, GMMg, AffineModel(D=2, version = 'euclidian', withlogdet=False))
 
 # To change sigma also and optimize it (as in classic 2-point set probablistic ICP)
 if sigma_start is not None:

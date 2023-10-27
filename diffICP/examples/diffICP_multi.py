@@ -94,8 +94,6 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
                           computversion="keops",        # "torch" or "keops"
                           scheme="Ralston")             # "Euler" or "Ralston"
 
-# Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-# PSR = diffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
 PSR = DiffPSR(x0, GMMi, LMi)
 # Add a support point scheme ?
 PSR.set_support_scheme("decim", rho=0.7)
@@ -128,7 +126,7 @@ for it in range(nIter):
         a0_evol.append( [ a0k.clone().detach().cpu() for a0k in PSR.a0 ] ) # only in diffPSR case
 
     ### EM step for GMM model
-    PSR.GMM_opt(repeat=10)
+    PSR.GMM_opt(max_iterations=10)
 
     ### M step optimization for diffeomorphisms (individually for each k)
     PSR.Reg_opt(tol=1e-5, nmax=1)

@@ -7,10 +7,7 @@ import pickle
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
-
-
 plt.ion()
-
 import torch
 
 #pykeops.clean_pykeops()
@@ -79,7 +76,7 @@ savelist.extend(("basic_ICP","use_diffPSR","nIter"))
 ##############################
 
 import scipy.io
-chui_dataset = 1    # (1 to 5)
+chui_dataset = 3    # (1 to 5)
 yo = scipy.io.loadmat(f"diffICP/examples/chui-data/demodata_ex{chui_dataset}.mat")
 x_name = f'x{[1,2,3,1,1][chui_dataset-1]}'   # name of the variables in the chui file (no general rule :))
 y_name = f'y{[1,2,3,"2a","2a"][chui_dataset-1]}'   # name of the variables in the chui file (no general rule :))

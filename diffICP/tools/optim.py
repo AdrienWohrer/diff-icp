@@ -1,5 +1,5 @@
 '''
-Overall gradient-based optimization procedure, used in different places of the module.
+Gradient-based optimization procedure, used in different places of the module.
 This is basically a wrapper for Pytorch's L-BFGS optimization procedure.
 '''
 
@@ -102,4 +102,3 @@ def LBFGS_optimization(p0, lossfunc, nmax=10, tol=1e-3, errthresh=1e8):
     p = [ a.detach() for a in p ]
     nsteps = i
     return p, L, nsteps, change
-

@@ -1,5 +1,6 @@
 '''
-Testing the full diffICP algorithm (multiple frames + multiple structures)
+Testing the full diffICP algorithm (multiple frames + multiple structures).
+WARNING : experimental, not documented in GSI conference article
 '''
 
 import copy
@@ -162,14 +163,15 @@ LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
                           lambd= 5e2,           # lambda of the LDDMM regularization
                           version = "logdet")   # "logdet", "classic" or "hybrid"
 
-# Without support decimation (Rdecim=None) or with support decimation (Rdecim>0)
-PSR = DiffPSR(x0, GMMi, LMi, Rdecim=0.7, Rcoverwarning=1)
-# PSR = diffPSR(x0, GMMi, LMi, Rdecim=None)
+PSR = DiffPSR(x0, GMMi, LMi)
+# Add a support point scheme ?
+PSR.set_support_scheme("decim", rho=0.7)
+# PSR.set_support_scheme("grid", rho=1.0)
 
 ### Point Set Registration model : affine version
 
-# PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'rigid'))
-# PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'affine', withlogdet=False))
+# PSR = AffinePSR(x0, GMMi, AffineModel(D=2, version = 'rigid'))
+# PSR = AffinePSR(x0, GMMi, AffineModel(D=2, version = 'affine'))
 
 # for storing results
 a0_evol = []
@@ -189,7 +191,7 @@ for it in range(nIter):
         a0_evol.append( [ a0k.clone() for a0k in PSR.a0 ] )
 
     ### EM step for GMM model
-    PSR.GMM_opt(repeat=10)
+    PSR.GMM_opt(max_iterations=10)
 
     ### M step optimization for diffeomorphisms (individually for each k)
     PSR.Reg_opt(tol=1e-5)
