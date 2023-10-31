@@ -211,7 +211,8 @@ if __name__ == '__main__':
             x0 = yo["x0"]  # Sample point sets
     else:
         N = 100
-        x0, _, _ = generate_spiral_point_sets(K=1, Nkbounds=(N, N + 1),
+        K = 10
+        x0, _, _ = generate_spiral_point_sets(K=K, Nkbounds=(N, N + 40),
                                               sigma_GMM=0.025,
                                               sigma_LDDMM=0.1, lambda_LDDMM=1e2)
 
