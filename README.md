@@ -34,7 +34,7 @@ Directory **diffICP/core** contains the core models. Mainly:
 Directory **diffICP/api** contains user-friendly interfaces for 
   - the two-point-set matching problem, with various algorithms.
   - building a groupwise point-set atlas, with various algorithms.
-  - 
+
 Directory **diffICP/examples** contains some use cases (somewhat obsolete now, better see **diffICP/api** instead)
   - *diffICP_basic.py* illustrates registration of a single point set to a known GMM model (Fig. 1 of the GSI article)
   - *diffICP_multi.py* illustrates registration of multiple point sets to a common GMM model that is inferred from the data (Fig. 2 of the GSI article)
