@@ -54,26 +54,57 @@ def vtk2torch(vtkfile):
 
 ##################################################################################
 
-def deformetrica_atlas(x, initial_template:torch.Tensor,
-                       model_parameters,
-                       dense_mode=True, estimator_options=None, computversion='keops'):
+def deformetrica_atlas(x, initial_template:torch.Tensor, model_parameters,
+                       numerical_options={}, estimator_options={}):
     '''
     Launch standard LDDMM atlas building, using deformetrica api.
 
-    :param x: input data points. Several possible formats, e.g., x[k][s] = cloud point from frame k and structure s
+    :param x: input data points. Several possible formats, e.g., x[k][s] = cloud point from frame k and structure s;
     :param initial_template: initial location of the template points ;
+
     :param model_parameters: main model parameters :
         model_parameters["sigma_data"]: spatial std. of the RKHS Kernel used to define the data distance, (K(x)=exp(-x^2/2*sigma^2)) ;
         model_parameters["noise_std"]: scaling parameter of the data loss term, so Loss = \sum_s rkhs_distance(s) / noise_std[s]^2 ;
         model_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
 
-    :param dense_mode: boolean. location of the LDDMM control points (True: all template points / False: on a grid) ;
+    :param numerical_options: dict with various numerical details of the algorithm :
+        numerical_options["computversion"] : "keops" or "torch" ;
+        numerical_options["dense_mode"] : True -> control points = template points, False -> control points on a grid ;
+
     :param estimator_options: numerical options for the optimization procedure (see code) ;
-    :param computversion: 'keops' or 'torch' ;
     :return: PSR [main output, registration object after optim], shoot_defo, iter_status [extra info produced by deformetrica]
     '''
 
-    assert {"sigma_data","noise_std","sigma_LDDMM"}.issubset(model_parameters.keys()), "model_parameters should define values of sigma_data, noise_std and sigma_LDDMM"
+    ######################
+    # Check mandatory model parameters
+
+    assert {"sigma_data","noise_std","sigma_LDDMM"}.issubset(model_parameters.keys()), \
+        "model_parameters should define values of sigma_data, noise_std and sigma_LDDMM"
+
+    ######################
+    # Set default values for optional arguments (numerical etc.)
+
+    numerical_options = numerical_options.copy()
+    estimator_options = estimator_options.copy()
+
+    def set_default(dico, key, value):
+        if dico.get(key) is None:
+            dico[key] = value
+
+    default_support_scheme = {
+                "scheme": "grid",   # "dense", "grid" or "decim"
+                "rho": 1.0}         # remaining parameters to diffPSR.set_support_scheme()
+
+    set_default(numerical_options, "dense_mode", False)
+    set_default(numerical_options, "computversion", "keops")
+
+    set_default(estimator_options, 'optimization_method_type', 'GradientAscent')  # 'GradientAscent' or 'ScipyLBFGS' (better but less stable)
+    set_default(estimator_options, 'max_iterations', 500)
+    set_default(estimator_options, 'convergence_tolerance', 1e-7)
+    set_default(estimator_options, 'initial_step_size', 1e-6)
+
+    #########################
+    # Temporary input/output storage for deformetrica
 
     tmpdir = f"saving/last_deformetrica_tmp"
     datadir = f"{tmpdir}/data"
@@ -115,34 +146,28 @@ def deformetrica_atlas(x, initial_template:torch.Tensor,
     ### TODO : Generalize to the case when there are multiple structures s !
     template_specifications = {
         'pointset' : {'deformable_object_type': 'pointcloud',
-                     'kernel_type': computversion,
+                     'kernel_type': numerical_options["computversion"],
                      'kernel_width': model_parameters["sigma_data"] * np.sqrt(2),
                      'noise_std': model_parameters["noise_std"],
                      'filename': f"{datadir}/initial_template.vtk"}
     }
 
-    ### PREPARE ESTIMATOR_OPTIONS IN SUITABLE FORM
+    ### Add callback to estimator options
+    # (Nota : status_dict does not hold enough information to be used for online plotting as in my own atlas methods)
 
     iter_status = []
     def estimator_callback(status_dict):
         iter_status.append(status_dict)
         return True
-
-    if estimator_options is None:
-        estimator_options = {'optimization_method_type': 'GradientAscent',     # 'GradientAscent' or 'ScipyLBFGS' (better but less stable)
-                         'max_iterations': 500,
-                         'convergence_tolerance': 1e-7, 'initial_step_size': 1e-6}
-    # Add callback
-    estimator_options = copy.deepcopy(estimator_options)    # add callback only on a local copy of estimator_options
     estimator_options["callback"] = estimator_callback
 
     ### PREPARE MODEL_OPTIONS IN SUITABLE FORM
 
     model_options = {'dimension': D,
-                     'deformation_kernel_type': computversion,  # 'torch' or 'keops'
+                     'deformation_kernel_type': numerical_options["computversion"],  # 'torch' or 'keops'
                      'deformation_kernel_width': model_parameters["sigma_LDDMM"] * np.sqrt(2),   # sigma of LDDMM kernel
-                     'dense_mode': dense_mode,                  # True -> one control point per template point. False -> control points on a regular grid
-                     'number_of_timepoints': 11,                # Not sure this is even taken into account ???
+                     'dense_mode': numerical_options["dense_mode"],     # True -> one control point per template point. False -> control points on a regular grid
+                     'number_of_timepoints': 11,                        # Not sure this is even taken into account ???
                      'dtype': 'float32',
                      'gpu_mode': dfca.GpuMode.NONE}
 
@@ -186,7 +211,7 @@ def deformetrica_atlas(x, initial_template:torch.Tensor,
     PSR.update_state()
 
     # Also recover the shooting of the different point sets by deformetrica. Store this in our handmade `shoot` format.
-    # This is useful for debug : we can check afterwards that our handamade PSR object computes the same trajectories,
+    # This is only useful for debug : we can check afterwards that our handamade PSR object computes the same trajectories,
     # as it should since it has the same support points and the same initial momenta.
 
     shoot_defo = [[ (vtk2torch(f"{outdir}/DeterministicAtlas__flow__pointset__subject_{k}__tp_{t}.vtk"),)
@@ -195,7 +220,7 @@ def deformetrica_atlas(x, initial_template:torch.Tensor,
     # Remove temporary directory
     shutil.rmtree(tmpdir)
 
-    return PSR, shoot_defo, iter_status
+    return PSR, iter_status, shoot_defo
 
 
 ################################################################################
@@ -237,10 +262,9 @@ if __name__ == '__main__':
                          'convergence_tolerance': 1e-6,
                          'initial_step_size': 1e-6}
 
-    PSR, shoot_defo, iter_status = \
-        deformetrica_atlas(x0, initial_template,
-                    model_parameters,
-                    dense_mode=False, estimator_options=estimator_options, computversion='keops')
+    PSR, iter_status, shoot_defo = \
+        deformetrica_atlas(x0, initial_template, model_parameters,
+                           estimator_options=estimator_options)
 
     import matplotlib
     matplotlib.use('TkAgg')

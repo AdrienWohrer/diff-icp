@@ -23,7 +23,7 @@ class AffineModel:
     #############################################################################################
     ### Constructor
 
-    # version = "rigid" (M=rotation), "similarity" (M=rotation+scaling), "affine" (general affine), "translation" (M=Id)
+    # version = "rigid" (M=rotation), "similarity" (M=rotation+scaling), "general_affine" (general M), "translation" (M=Id)
     # with_t = True/False. Also optimize a translation term (True or False)
     # withlogdet = True/False. Add to the registration energy the logdet of the matrix ("backward" model of registration)
 
@@ -131,7 +131,7 @@ class AffineModel:
                 lam = trBR / trA
             M = lam * R
 
-        elif self.version == 'affine':
+        elif self.version == 'general_affine':
             A = Xc.t() @ (z[:,None] * Xc)
             if not self.withlogdet:
                 # M = B / (X'*X) : classic (unconstrained) least square

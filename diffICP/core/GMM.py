@@ -87,8 +87,8 @@ class GaussianMixtureUnif(Module):
         }
         if use_outliers:
             self.outliers = {                   # (Can also be modified afterwards, externally, if required)
-                "vol0": None,   # Reference volume of the outlier distribution (if 'None', fixed automatically at first call to E_step)
-                "eta0": 0.0     # (Initial) value of log-odds-ratio for "outlier vs. GMM"
+                "vol0": None,                   # Reference volume of the outlier distribution (if 'None', fixed automatically at first call to E_step)
+                "eta0": 0.0                     # (Initial) value of log-odds-ratio for "outlier vs. GMM"
             }
         else:
             self.outliers = None                # Model with no outlier component

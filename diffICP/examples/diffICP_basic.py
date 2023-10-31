@@ -1,5 +1,5 @@
 '''
-Basic example : LDDMM registration of a point set to a fixed GMM model
+Basic example : LDDMM registration of a point set to a fixed GMM model.
 '''
 
 import time
@@ -23,7 +23,6 @@ from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.PSR import DiffPSR, AffinePSR
 from diffICP.visualization.visu import my_scatter
 from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
-
 
 ###################################################################
 # Saving simulation results
@@ -82,7 +81,6 @@ if plotstuff:
     my_scatter(x0)
 #    plot_shoot(shoot,color='b')
     plt.pause(1)
-
 
 ###################################################################
 ### Part 2 : Registration on fixed GMM model (new diffICP algorithm)

@@ -531,7 +531,7 @@ class DiffPSR(MultiPSR):
 
 class AffinePSR(MultiPSR):
     '''
-    multiPSR algorithm with affine (viz. euclidian, rigid) registrations. That is,
+    MultiPSR algorithm with affine (viz. euclidian, rigid) registrations. That is,
         T(X) = X * M' + t'      with
 
         X(N,d): input data points ;
@@ -551,10 +551,9 @@ class AffinePSR(MultiPSR):
             GMMi[s] = GMM model for structure s;
             In any case, the GMMs given as input will be *copied* in the multiPSR object;
 
-        :param AffMi: Affine model (and parameters) used in the algorithm, as provided in class AffineModel.
-            In particular, version = 'euclidian' (rotation+translation), 'rigid' (euclidian+scaling), 'linear' (unconstrained affine).
+        :param AffMi: Affine model (and parameters) used in the algorithm, as provided in class AffineModel (see affine.py).
 
-        :param dataspec: spec (dtype+device) under which all point sets are stored (see diffICP/spec.py)
+        :param dataspec: spec (dtype+device) under which all point sets are stored (see spec.py)
 
         :param compspec: spec (dtype+device) under which the actual computations (GMM and registrations) will be performed.
             These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
@@ -572,10 +571,12 @@ class AffinePSR(MultiPSR):
     ################################################################
     ################################################################
 
-    def Reg_opt(self):
+    def Reg_opt(self, tol=1e-3, nmax=1):
         '''
         Affine registration optimization function.
         '''
+
+        # Nota : tol and nmax are unused here, but kept for a similar signature with diffeomorphic case
 
         for k in range(self.K):
             ### Find best-fitting linear transform for frame k

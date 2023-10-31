@@ -31,14 +31,14 @@ Directory **diffICP/core** contains the core models. Mainly:
   - *affine.py* handles alternative registration functions based on affine (e.g., rigid, or more general linear) transformations. This can be used for comparison and/or preprocessing.
   - *PSR_standard.py* implements the 'standard' diffeomorphic Point Set Registration algorithm of Glaunès et al, for comparison.
 
-Directory **diffICP/examples** contains some use cases (somewhat obsolete now, better see **diffICP/atlas** and **diffICP/two_set** instead)
+Directory **diffICP/api** contains user-friendly interfaces for 
+  - the two-point-set matching problem, with various algorithms.
+  - building a groupwise point-set atlas, with various algorithms.
+  - 
+Directory **diffICP/examples** contains some use cases (somewhat obsolete now, better see **diffICP/api** instead)
   - *diffICP_basic.py* illustrates registration of a single point set to a known GMM model (Fig. 1 of the GSI article)
   - *diffICP_multi.py* illustrates registration of multiple point sets to a common GMM model that is inferred from the data (Fig. 2 of the GSI article)
   - *diffICP_full.py* illustrates a full model with multiple frames (e.g., patients) *and* multiple GMM models (e.g., brain structures) (not documented in the GSI article)
-
-Directory **diffICP/atlas** contains user-friendly interfaces for building a groupwise point-set atlas, with various algorithms.
-
-Directory **diffICP/two_set** contains user-friendly interfaces for the two-point-set matching problem, with various algorithms.
 
 Directories **diffICP/tools** and **diffICP/visualization** contain a number of helper functions.
 

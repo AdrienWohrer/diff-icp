@@ -34,10 +34,10 @@ savefile = "saving/registration_multi_spiral_1.pkl"
 savelist = []       # store names of variables to be saved
 
 # Plot figures ?
-plotstuff = False
+plotstuff = True
 
 # Number of global loop iterations
-nIter = 4
+nIter = 25
 
 ###################################################################
 ### Part 1 : Synthetic data : 'spiral' point sets
@@ -90,9 +90,9 @@ GMMi.to_optimize = {
 LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian kernel
                           D=2,                          # dimension of space
                           lambd= 5e2,                   # lambda of the LDDMM regularization
-                          version = "logdet",           # "logdet", "classic" or "hybrid"
+                          version = "hybrid",           # "logdet", "classic" or "hybrid"
                           computversion="keops",        # "torch" or "keops"
-                          scheme="Ralston")             # "Euler" or "Ralston"
+                          scheme="Euler")               # "Euler" or "Ralston"
 
 PSR = DiffPSR(x0, GMMi, LMi)
 # Add a support point scheme ?
