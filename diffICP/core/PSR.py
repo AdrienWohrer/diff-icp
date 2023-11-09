@@ -98,15 +98,15 @@ class MultiPSR:
 
         ### GMM model for inference (one per structure s)
 
-        if GMMi.spec != compspec:
-            raise ValueError("Spec (dtype+device) error : GMM 'spec' and multiPSR 'compspec' attributes should be the same")
-
         if isinstance(GMMi, GaussianMixtureUnif):
             self.GMMi = [copy.deepcopy(GMMi) for s in range(self.S)]
         else:
             if not isinstance(GMMi, list) or len(GMMi) != self.S:
                 raise ValueError("GMMi should be a single GMM model, or a list with S GMM models")
             self.GMMi = [copy.deepcopy(gmm) for gmm in GMMi]
+
+        if any(gmm.spec != compspec for gmm in self.GMMi):
+            raise ValueError("Spec (dtype+device) error : GMM 'spec' and multiPSR 'compspec' attributes should be the same")
 
         for s in range(self.S):
             # all (unwarped) points associated to structure s:

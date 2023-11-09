@@ -1,11 +1,11 @@
 '''
-Test the ICP algorithm (diffeomorphic or affine) on multiple point set registration (statistical atlas).
+Use the ICP algorithm (diffeomorphic or affine) for multiple point set registration (statistical atlas).
 
-Nota : running this file as a script provides an example usage of the function.
+Nota : running this file as a script executes an example usage of the function.
 Else, simply import function ICP_atlas in other scripts to use it there.
 '''
 
-import copy
+import copy, warnings
 import pickle
 import matplotlib
 from matplotlib import pyplot as plt
@@ -58,18 +58,18 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
 
     :param x0: input data points. Several possible formats, e.g., x0[k][s] = cloud point from frame k and structure s
 
-    :param GMM_parameters: dict with main model parameters for the GMM part :
+    :param GMM_parameters: dict with main model parameters for the GMM part:
         GMM_parameters["N_components"] : number of components (per structure) in the fitted GMM model ;
         GMM_parameters["optimize_weights"] : True/False, whether to optimize GMM component weights ;
         GMM_parameters["outlier_weight"] : None [no outlier component] or "optimize" [optimize weight] or float value [fixed log-odds ratio] ;
         GMM_parameters["initial_GMM"] : optional, impose a starting GMM model (overrides other parameters if present) ;
 
-    :param registration_parameters: dict with main model parameters for the registration part :
+    :param registration_parameters: dict with main model parameters for the registration part:
         registration_parameters["type"] : "rigid" or "similarity" or "general_affine" or "diffeomorphic" ;
         registration_parameters["lambda_LDDMM"]: regularization term of the LDDMM framework (only used if diffeomorphic) ;
         registration_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
 
-    :param numerical_options: dict with various numerical details of the algorithm :
+    :param numerical_options: dict with various numerical details of the algorithm:
         numerical_options["computversion"] : "keops" or "torch" ;
         numerical_options["support_LDDMM"] : dict, chosen LDDMM support scheme (see code below) ;
         numerical_options["gradcomponent_LDDMM"] : True (exact) or False (faster) ;
@@ -96,8 +96,11 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
         assert {"lambda_LDDMM","sigma_LDDMM"}.issubset(registration_parameters.keys()), \
             "if type=diffeomorphic, registration_parameters should define values of lambda_LDDMM and sigma_LDDMM"
 
-    assert {"N_components", "optimize_weights"}.issubset(GMM_parameters.keys()), \
-        "GMM_parameters should at least define values of N_components (int>0) and optimize_weights (True/False)"
+    if GMM_parameters.get("initial_GMM") is None:
+        assert {"N_components", "optimize_weights"}.issubset(GMM_parameters.keys()), \
+            "GMM_parameters should either\n" \
+            "- define a new GMM model with values (at least) of N_components (int>0) and optimize_weights (True/False)\n" \
+            "- define key 'initial_GMM' to provide an already existing GMM model."
 
     assert GMM_parameters.get("outlier_weight") is None or \
            GMM_parameters["outlier_weight"] == "optimize" or \
@@ -138,7 +141,7 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
 
     x0, K, S, D = read_point_sets(x0)
     if S > 1:
-        raise ValueError("This function does not allow multiple structures, for the moment.")
+        warnings.warn("This function has not been well tested with multiple structures, for the moment.")
 
     ### Create the MultiPSR object (Diff or Affine) that will perform the registration
 
@@ -146,15 +149,16 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
     is_initial_GMM = GMM_parameters.get("initial_GMM") is not None
     if is_initial_GMM:
         GMMi = copy.deepcopy(GMM_parameters["initial_GMM"])
-        # TODO : in that case, more logical to skip first GMM optimization and begin directly with registrations ? (as in standard_atlas.py)
     else:
         C = GMM_parameters["N_components"]
         use_outliers = GMM_parameters.get("outlier_weight") is not None
-        GMMi = GaussianMixtureUnif(torch.zeros(C,2), use_outliers=use_outliers)    # initial value for mu = whatever (will be changed by PSR algo)
+        GMMi = GaussianMixtureUnif(torch.zeros(C,D), use_outliers=use_outliers)    # initial value for mu = whatever (will be changed by PSR algo)
         if isinstance(GMM_parameters.get("outlier_weight"), (int,float)):
             GMMi.outliers["eta0"] = GMM_parameters.get("outlier_weight")
         GMMi.to_optimize = {
-            "mu" : True, "sigma" : True, "w" : GMM_parameters["optimize_weights"], "eta0" : GMM_parameters.get("outlier_weight") == "optimize"
+            "mu" : True, "sigma" : True,
+            "w" : GMM_parameters["optimize_weights"],
+            "eta0" : GMM_parameters.get("outlier_weight") == "optimize"
         }
 
     if is_diff:
@@ -209,13 +213,14 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
             evol["t"].append([tk.clone().detach().cpu() for tk in PSR.t])
 
         # EM step for GMM model
-        PSR.GMM_opt(max_iterations=optim_options["max_repeat_GMM"], tol=tol)
+        if not (is_initial_GMM and it == 0):    # (in that case, start by optimizing registrations)
+            PSR.GMM_opt(max_iterations=optim_options["max_repeat_GMM"], tol=tol)
 
         if plotstuff:
             plot_state(PSR, 2)
             plot_state(PSR, 3, only_GMM=True)
 
-        # M step optimization for diffeomorphisms (individually for each k)
+        # M step optimization for registrations (individually for each k)
         PSR.Reg_opt(tol=tol, nmax=1)
 
         if plotstuff:
@@ -263,19 +268,19 @@ if __name__ == '__main__':
     # GMM parameters
     GMM_parameters = {"N_components": 20,
                       "optimize_weights": True,
-                        "outlier_weight": None}
+                      "outlier_weight": None}
 
     # Registration parameters
     registration_parameters = {"type": "diffeomorphic",
-                        "lambda_LDDMM": 500,
-                        "sigma_LDDMM": 0.2}
+                               "lambda_LDDMM": 500,
+                               "sigma_LDDMM": 0.2}
 
     # registration_parameters = {"type": "similarity"}      # affine version
 
     # Numerical parameters : use default for the moment
 
     # Optimization options
-    optim_options = {'max_iterations': 125,              # Maximm number of global loop iterations
+    optim_options = {'max_iterations': 125,              # Maximum number of global loop iterations
                      'convergence_tolerance': 1e-3,     # for each optimization, including global loop itself (for the moment!)
                      'max_repeat_GMM': 25}
 
