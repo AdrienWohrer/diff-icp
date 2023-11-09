@@ -90,11 +90,13 @@ class MultiPSR_std:
 
         :param dataspec: spec (dtype+device) under which all point sets are stored (see diffICP/spec.py);
 
-        :param compspec: spec (dtype+device) under which the actual computations (GMM and registrations) will be performed.
+        :param compspec: spec (dtype+device) under which the actual computations (registrations and template) will be performed.
             These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
             but there are too many frames/point sets to store them all on the Gpu (use dataspec["device"]='cpu').
             Of course, ideally, everything should be kept on the same device to avoid copies between devices.
         '''
+
+        # TODO : code for specs written, but not tested. Expect failures when using different specs than defspec.
 
         self.dataspec, self.compspec = dataspec, compspec
         self.DataKernel = DataKernel

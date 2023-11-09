@@ -17,6 +17,7 @@ import torch
 from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.GMM import GaussianMixtureUnif
 
+from diffICP.tools.spec import defspec
 from diffICP.tools.inout import read_point_sets
 from diffICP.tools.kernel import GaussKernel
 from diffICP.visualization.visu import my_scatter
@@ -28,8 +29,7 @@ from diffICP.core.PSR_standard import DiffPSR_std
 ### Debug function : plot the current state of PSR model (template location, target points, trajectories etc.)
 
 matplotlib.use('TkAgg')
-def plot_step(PSR:DiffPSR_std, fig_index=None, only_template=False):
-    plt.figure(fig_index)
+def plot_state(PSR:DiffPSR_std, only_template=False):
     plt.clf()
     y1 = PSR.y1[:, 0]   # warped templates
     x = PSR.x[:, 0]    # data points
@@ -55,7 +55,7 @@ def plot_step(PSR:DiffPSR_std, fig_index=None, only_template=False):
 
 def standard_atlas(x, initial_template: torch.Tensor,
                        model_parameters: dict,
-                       numerical_options={}, optim_options={}, plotstuff=True):
+                       numerical_options={}, optim_options={}, callback_function=None):
     '''
     Launch standard LDDMM atlas building, using personal reimplementation in PSR_standard.py.
 
@@ -75,11 +75,13 @@ def standard_atlas(x, initial_template: torch.Tensor,
 
     :param optim_options: numerical options for the optimization procedure (see code below) ;
 
-    :param plotstuff: True/False, whether to plot model evolution during optimization (only in 2D) ;
+    :param callback_function: optional function to execute at every iteration of the optimization loop, e.g. for reporting or plotting.
+        Must take the form callback_function(PSR, before_reg=False/True), with PSR the PSR object being currently optimized
+
     :return: PSR [main output, registration object after optim], evol [evolution of selected quantities over iterations]
     '''
 
-    # TODO : transform plotstuff into callback function
+    # TODO : handling of specs (gpu vs cpu) written but not tested. Expect failures when using different specs than defspec.
 
     ######################
     # Check mandatory model parameters
@@ -107,10 +109,15 @@ def standard_atlas(x, initial_template: torch.Tensor,
     set_default(numerical_options, "computversion", "keops")
     set_default(numerical_options, "integration_scheme_LDDMM", "Euler")    # Euler (faster) vs Ralston (more precise)
     set_default(numerical_options, "integration_nt_LDDMM", 10)             # number of time steps
+    set_default(numerical_options, "compspec", defspec)                    # 'compspec' = device for computations (gpu vs cpu)
+    set_default(numerical_options, "dataspec", defspec)                    # 'dataspec' = device for storage (gpu vs cpu)
 
     set_default(optim_options, "max_iterations", 25)            # Number of global loop iterations (fixed, for the moment !)
     set_default(optim_options, "convergence_tolerance", 1e-3)   # Tolerance parameter (TODO differentiate between global loop and single optimizations ?)
     set_default(optim_options, "start_by_template_opt", False)  # can drastically change the resulting convergence !
+
+    compspec = numerical_options["compspec"]
+    dataspec = numerical_options["dataspec"]
 
     #########################
 
@@ -126,7 +133,7 @@ def standard_atlas(x, initial_template: torch.Tensor,
 
     ### Create the DiffPSR_std object that will perform the registration
 
-    DataKernel = GaussKernel(model_parameters["sigma_data"], D=D)
+    DataKernel = GaussKernel(model_parameters["sigma_data"], D=D, spec=compspec)
 
     LMi = LDDMMModel(sigma=model_parameters["sigma_LDDMM"],         # sigma of the Gaussian kernel
                      D=D,                       # dimension of space
@@ -134,10 +141,11 @@ def standard_atlas(x, initial_template: torch.Tensor,
                      version="classic",
                      computversion=numerical_options["computversion"],      # "torch" or "keops"
                      scheme=numerical_options["integration_scheme_LDDMM"],  # "Euler" (faster) or "Ralston" (more precise)
+                     spec= compspec,                                        # device and type of data
                      nt=numerical_options["integration_nt_LDDMM"])
 
-    PSR = DiffPSR_std(x, initial_template,
-                      model_parameters["noise_std"], LMi, DataKernel,
+    PSR = DiffPSR_std(x, initial_template, model_parameters["noise_std"], LMi, DataKernel,
+                      compspec=compspec, dataspec=dataspec,
                       template_weights=model_parameters["use_template_weights"])
 
     supp_scheme = numerical_options["support_LDDMM"]["scheme"]
@@ -165,17 +173,15 @@ def standard_atlas(x, initial_template: torch.Tensor,
         if model_parameters["use_template_weights"]:
             evol["w0"].append(copy.deepcopy(PSR.w0))
 
-        if plotstuff:
-            plot_step(PSR, 2)
-            plot_step(PSR, 3, only_template=True)
+        if callback_function is not None:
+            callback_function(PSR, before_reg=True)
 
         if not (it == 1 and optim_options["start_by_template_opt"]):
             print("Updating diffeomorphisms (individually for each frame k).")
             PSR.Reg_opt(nmax=1)
 
-            if plotstuff:
-                plot_step(PSR, 2)
-                plot_step(PSR, 3, only_template=True)
+        if callback_function is not None:
+            callback_function(PSR, before_reg=False)
 
         print("Updating (common) template.")
         PSR.Template_opt(nmax=1)
@@ -219,25 +225,30 @@ if __name__ == '__main__':
     # Template point set. Recommended initialization : use one of the datasets
     initial_template = x0[0]
 
-    # Model parameters
     model_parameters = {"sigma_data": 0.1,
                         "noise_std": 0.2,
                         "sigma_LDDMM": 0.2,
                         "use_template_weights": False
                         }
 
-    # Numerical parameters : use default for the moment
-
-    # Optimization options
     optim_options = {'max_iterations': 15,              # Number of global loop iterations (fixed, for the moment)
                      'convergence_tolerance': 1e-4,     # for each optimization in the global loop (for the moment)
                      'start_by_template_opt': False     # can drastically change the resulting convergence !
                      }
 
+    # numerical parameters : use default for the moment
+
+    def callback_plot(PSR, before_reg):
+        plt.figure(1)
+        plot_state(PSR)
+        if before_reg:
+            plt.figure(2)
+            plot_state(PSR, only_template=True)
+
+    # Launch
     PSR, evol = \
-        standard_atlas(x0, initial_template,
-                    model_parameters,
-                    optim_options=optim_options)
+        standard_atlas(x0, initial_template, model_parameters,
+                    optim_options=optim_options, callback_function=callback_plot)
 
     import matplotlib
     matplotlib.use('TkAgg')

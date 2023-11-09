@@ -23,16 +23,15 @@ from diffICP.core.GMM import GaussianMixtureUnif
 from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.affine import AffineModel
 from diffICP.core.PSR import MultiPSR, DiffPSR, AffinePSR
-from diffICP.tools.kernel import GaussKernel
+from diffICP.tools.spec import defspec
 from diffICP.tools.inout import read_point_sets
 from diffICP.visualization.visu import my_scatter
 
 ##################################################################################
-### Debug function : plot the current state of PSR model (GMM location, target points, trajectories etc.)
+### 2d debug function : plot the current state of PSR model (GMM location, target points, trajectories etc.)
 
 matplotlib.use('TkAgg')
-def plot_state(PSR:MultiPSR, fig_index=None, only_GMM=False):
-    plt.figure(fig_index)
+def plot_state(PSR:MultiPSR, only_GMM=False):
     plt.clf()
 
     x0 = PSR.x0[:, 0]
@@ -52,7 +51,7 @@ def plot_state(PSR:MultiPSR, fig_index=None, only_GMM=False):
 ##################################################################################
 
 def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
-                       numerical_options={}, optim_options={}, plotstuff=True):
+                       numerical_options={}, optim_options={}, callback_function=None):
     '''
     Launch ICP-based atlas building. This function showcases the use of class DiffPSR (resp. AffinePSR).
 
@@ -77,12 +76,13 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
 
     :param optim_options: numerical options for the optimization procedure (see code below) ;
 
-    :param plotstuff: True/False, whether to plot model evolution during optimization (only in 2D) ;
+    :param callback_function: optional function to execute at every iteration of the optimization loop, e.g. for reporting or plotting.
+        Must take the form callback_function(PSR, before_reg=False/True), with PSR the PSR object being currently optimized
+
     :return: PSR [main output, registration object after optim], evol [evolution of selected quantities over iterations]
     '''
 
-    # TODO transform plotstuff into customizable callback function if necessary
-    # TODO handle specs if necessary
+    # TODO : handling of specs (gpu vs cpu) written but not tested. Expect failures when using different specs than defspec.
 
     ######################
     # Check mandatory model parameters (GMM and registration)
@@ -126,10 +126,15 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
     set_default(numerical_options, "gradcomponent_LDDMM", False)           # False= approximate but generally sufficient :)
     set_default(numerical_options, "integration_scheme_LDDMM", "Euler")    # Euler (faster) vs Ralston (more precise)
     set_default(numerical_options, "integration_nt_LDDMM", 10)             # number of time steps
+    set_default(numerical_options, "compspec", defspec)                    # 'compspec' = device for computations (gpu vs cpu)
+    set_default(numerical_options, "dataspec", defspec)                    # 'dataspec' = device for storage (gpu vs cpu)
 
     set_default(optim_options, "max_iterations", 25)            # Maximum number of global loop iterations
     set_default(optim_options, "convergence_tolerance", 1e-3)   # Tolerance parameter (TODO differentiate between global loop and single optimizations ?)
     set_default(optim_options, "max_repeat_GMM", 10)            # Maximum number of EM steps in each GMM optimization loop
+
+    compspec = numerical_options["compspec"]
+    dataspec = numerical_options["dataspec"]
 
     #########################
 
@@ -148,11 +153,12 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
     # GMM model
     is_initial_GMM = GMM_parameters.get("initial_GMM") is not None
     if is_initial_GMM:
-        GMMi = copy.deepcopy(GMM_parameters["initial_GMM"])
+        GMMi = copy.deepcopy(GMM_parameters["initial_GMM"])                         # (Nota: could lead to spec clashes in some weird cases)
     else:
         C = GMM_parameters["N_components"]
         use_outliers = GMM_parameters.get("outlier_weight") is not None
-        GMMi = GaussianMixtureUnif(torch.zeros(C,D), use_outliers=use_outliers)    # initial value for mu = whatever (will be changed by PSR algo)
+        GMMi = GaussianMixtureUnif(torch.zeros(C,D), use_outliers=use_outliers,     # initial value for mu = whatever (will be changed by PSR algo)
+                                   spec=compspec)
         if isinstance(GMM_parameters.get("outlier_weight"), (int,float)):
             GMMi.outliers["eta0"] = GMM_parameters.get("outlier_weight")
         GMMi.to_optimize = {
@@ -170,9 +176,10 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
                         gradcomponent = numerical_options["gradcomponent_LDDMM"],   # True or False
                         computversion = numerical_options["computversion"],         # "torch" or "keops"
                         scheme= numerical_options["integration_scheme_LDDMM"],      # "Euler" (faster) or "Ralston" (more precise)
+                        spec= compspec,                                             # device and type of data
                         nt= numerical_options["integration_nt_LDDMM"])
 
-        PSR = DiffPSR(x0, GMMi, LMi)
+        PSR = DiffPSR(x0, GMMi, LMi, compspec=compspec, dataspec=dataspec)
 
         supp_scheme = numerical_options["support_LDDMM"]["scheme"]
         if supp_scheme != "dense":
@@ -188,7 +195,7 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
                             withlogdet=True,
                             with_t=True)
 
-        PSR = AffinePSR(x0, GMMi, AffMi)
+        PSR = AffinePSR(x0, GMMi, AffMi, compspec=compspec, dataspec=dataspec)
 
         # for storing results
         evol = {"M": [],            # evol["M"][it][k] = current registration matrix for frame k at iteration it
@@ -216,15 +223,14 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
         if not (is_initial_GMM and it == 0):    # (in that case, start by optimizing registrations)
             PSR.GMM_opt(max_iterations=optim_options["max_repeat_GMM"], tol=tol)
 
-        if plotstuff:
-            plot_state(PSR, 2)
-            plot_state(PSR, 3, only_GMM=True)
+        if callback_function is not None:
+            callback_function(PSR, before_reg=True)
 
         # M step optimization for registrations (individually for each k)
         PSR.Reg_opt(tol=tol, nmax=1)
 
-        if plotstuff:
-            plot_state(PSR, 2)
+        if callback_function is not None:
+            callback_function(PSR, before_reg=False)
 
         if it > 1 and abs(PSR.FE-last_FE) < tol * abs(last_FE):
             print("Difference in Free Energy is below tolerance threshold : optimization is over.")
@@ -265,28 +271,32 @@ if __name__ == '__main__':
                                               sigma_GMM=0.025,
                                               sigma_LDDMM=0.1, lambda_LDDMM=1e2)
 
-    # GMM parameters
     GMM_parameters = {"N_components": 20,
                       "optimize_weights": True,
                       "outlier_weight": None}
 
-    # Registration parameters
     registration_parameters = {"type": "diffeomorphic",
                                "lambda_LDDMM": 500,
                                "sigma_LDDMM": 0.2}
 
     # registration_parameters = {"type": "similarity"}      # affine version
 
-    # Numerical parameters : use default for the moment
-
-    # Optimization options
     optim_options = {'max_iterations': 125,              # Maximum number of global loop iterations
                      'convergence_tolerance': 1e-3,     # for each optimization, including global loop itself (for the moment!)
                      'max_repeat_GMM': 25}
 
+    # numerical parameters : use default for the moment
+
+    def callback_plot(PSR, before_reg):
+        plt.figure(1)
+        plot_state(PSR)
+        if before_reg:
+            plt.figure(2)
+            plot_state(PSR, only_GMM=True)
+
     # Launch
     PSR, evol = ICP_atlas(x0, GMM_parameters, registration_parameters,
-                              optim_options=optim_options, plotstuff=True)
+                              optim_options=optim_options, callback_function=callback_plot)
 
     print("Final losses :")
     print(f"    regularity: {sum(PSR.regloss)})")
