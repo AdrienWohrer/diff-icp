@@ -7,7 +7,7 @@ Nota : running this file as a script provides an example usage of the function.
 Else, simply import function standard_atlas in other scripts to use it there.
 '''
 
-import copy
+import copy, warnings
 import pickle
 
 import matplotlib
@@ -54,12 +54,13 @@ def plot_state(PSR:DiffPSR_std, only_template=False):
 ##################################################################################
 
 def standard_atlas(x, initial_template: torch.Tensor,
-                       model_parameters: dict,
+                       model_parameters={},
                        numerical_options={}, optim_options={}, callback_function=None):
     '''
     Launch standard LDDMM atlas building, using personal reimplementation in PSR_standard.py.
 
     :param x: input data points. Several possible formats, e.g., x[k][s] = cloud point from frame k and structure s
+
     :param initial_template: initial location of the template points ;
 
     :param model_parameters: dict with main model parameters :
@@ -128,8 +129,6 @@ def standard_atlas(x, initial_template: torch.Tensor,
     #   D = dimension of space
 
     x, K, S, D = read_point_sets(x)
-    if S > 1:
-        raise ValueError("This function does not allow multiple structures, for the moment.")
 
     ### Create the DiffPSR_std object that will perform the registration
 

@@ -50,7 +50,7 @@ def plot_state(PSR:MultiPSR, only_GMM=False):
 ##################################################################################
 ##################################################################################
 
-def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
+def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
                        numerical_options={}, optim_options={}, callback_function=None):
     '''
     Launch ICP-based atlas building. This function showcases the use of class DiffPSR (resp. AffinePSR).
@@ -87,15 +87,6 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
     ######################
     # Check mandatory model parameters (GMM and registration)
 
-    allowed_reg_types = ["rigid", "similarity", "general_affine", "diffeomorphic"]
-    assert any([registration_parameters["type"] == typ for typ in allowed_reg_types]), \
-        f"registration_parameters['type'] should be one of: {allowed_reg_types}"
-
-    is_diff = registration_parameters["type"] == "diffeomorphic"
-    if is_diff:
-        assert {"lambda_LDDMM","sigma_LDDMM"}.issubset(registration_parameters.keys()), \
-            "if type=diffeomorphic, registration_parameters should define values of lambda_LDDMM and sigma_LDDMM"
-
     if GMM_parameters.get("initial_GMM") is None:
         assert {"N_components", "optimize_weights"}.issubset(GMM_parameters.keys()), \
             "GMM_parameters should either\n" \
@@ -106,6 +97,16 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
            GMM_parameters["outlier_weight"] == "optimize" or \
            isinstance(GMM_parameters["outlier_weight"], (int,float)), \
             "incorrect value for GMM_parameters['outlier_weight']"
+
+    allowed_reg_types = ["rigid", "similarity", "general_affine", "diffeomorphic"]
+    assert any([registration_parameters.get("type") == typ for typ in allowed_reg_types]), \
+        f"registration_parameters['type'] should be one of: {allowed_reg_types}"
+
+    is_diff = registration_parameters["type"] == "diffeomorphic"
+    if is_diff:
+        assert {"lambda_LDDMM","sigma_LDDMM"}.issubset(registration_parameters.keys()), \
+            "if type=diffeomorphic, registration_parameters should define values of lambda_LDDMM and sigma_LDDMM"
+
 
     ######################
     # Set default values for optional arguments (numerical etc.)
@@ -145,8 +146,6 @@ def ICP_atlas(x0, GMM_parameters: dict, registration_parameters: dict,
     #   D = dimension of space
 
     x0, K, S, D = read_point_sets(x0)
-    if S > 1:
-        warnings.warn("This function has not been well tested with multiple structures, for the moment.")
 
     ### Create the MultiPSR object (Diff or Affine) that will perform the registration
 
