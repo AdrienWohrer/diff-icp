@@ -24,7 +24,7 @@ from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.affine import AffineModel
 from diffICP.core.PSR import MultiPSR, DiffPSR, AffinePSR
 from diffICP.tools.spec import defspec
-from diffICP.tools.inout import read_point_sets
+from diffICP.tools.in_out import read_point_sets
 from diffICP.visualization.visu import my_scatter
 
 ##################################################################################

@@ -26,7 +26,7 @@ from diffICP.tools.point_sets import decimate
 from diffICP.tools.spec import defspec
 from diffICP.tools.kernel import GenKernel
 from diffICP.visualization.visu import get_bounds       # (recycled for grid bounds computation)
-from diffICP.tools.inout import read_point_sets
+from diffICP.tools.in_out import read_point_sets
 
 
 #######################################################################

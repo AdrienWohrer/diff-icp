@@ -26,7 +26,7 @@ from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.affine import AffineModel
 from diffICP.core.PSR import MultiPSR, DiffPSR, AffinePSR
 from diffICP.tools.kernel import GaussKernel
-from diffICP.tools.inout import read_point_sets
+from diffICP.tools.in_out import read_point_sets
 from diffICP.visualization.visu import my_scatter, get_bounds, on_top
 from diffICP.visualization.grid import Gridlines
 from diffICP.tools.spec import defspec

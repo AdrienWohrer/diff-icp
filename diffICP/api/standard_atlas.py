@@ -18,7 +18,7 @@ from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.GMM import GaussianMixtureUnif
 
 from diffICP.tools.spec import defspec
-from diffICP.tools.inout import read_point_sets
+from diffICP.tools.in_out import read_point_sets
 from diffICP.tools.kernel import GaussKernel
 from diffICP.visualization.visu import my_scatter
 
