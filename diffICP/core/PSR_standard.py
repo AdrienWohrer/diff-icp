@@ -22,7 +22,7 @@ from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.affine import AffineModel
 from diffICP.core.registrations import LDDMMRegistration, AffineRegistration
 
-from diffICP.tools.decimate import decimate
+from diffICP.tools.point_sets import decimate
 from diffICP.tools.spec import defspec
 from diffICP.tools.kernel import GenKernel
 from diffICP.visualization.visu import get_bounds       # (recycled for grid bounds computation)

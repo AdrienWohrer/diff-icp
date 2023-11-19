@@ -1,11 +1,33 @@
+'''
+Miscellaneous helper functions regarding the structure and manipulation of point sets.
+'''
 
 import numpy as np
 import torch
+from pykeops.torch import LazyTensor
 import matplotlib.pyplot as plt
 from diffICP.visualization.visu import my_scatter
 
-use_cuda = torch.cuda.is_available()
-dtype = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
+################################################
+
+def intrinsic_scale(X):
+    '''
+    Compute an "intrinsic scale" sigma_X for point set X (provided as a torch 2d tensor).
+    sigma_X is defined as the mean distance from each point to its nearest neighbor in the set.
+    Intuitively, sigma_X represents the minimal amount of blurring necessary to "stop seeing" the point set structure.
+    '''
+
+    # TODO any cleaner way of doing this ?
+
+    X_i = LazyTensor(X[:, None, :])
+    X_j = LazyTensor(X[None, :, :])
+    D_ij = ((X_i - X_j) ** 2).sum(-1)
+    min_D_i = D_ij.Kmin(2, dim=1)[:,1] # (=second smallest ; the smallest is always 0, i.e., each point with itself)
+    sigma_X = min_D_i.mean().sqrt()
+    return 1 * sigma_X.item()     # multiplicative factor, close to 1, is ad hoc. TODO: probably depends on dimension D of the point sets (think!)
+
+
+#############################################################
 
 def decimate(x,R):
     '''

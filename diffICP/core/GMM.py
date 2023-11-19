@@ -38,9 +38,9 @@ from diffICP.visualization.visu import get_bounds, my_scatter
 
 class GaussianMixtureUnif(Module):
 
-    def __init__(self, mu, use_outliers=False, spec=defspec, computversion="keops"):
+    def __init__(self, mu, sigma=None, use_outliers=False, spec=defspec, computversion="keops"):
         '''
-        Gaussian Mixture Model with uniform isotropic covariances sigma^2*Id
+        Gaussian Mixture Model with centroids mu and uniform isotropic covariances sigma^2*Id
 
         Implementation is based on log scores, log odd-ratios, etc., which are more stable numerically.
 
@@ -65,6 +65,7 @@ class GaussianMixtureUnif(Module):
         This is the basic initialization function. Many other parameters (self.to_optimize, self.outliers, etc.) can be set afterwards, see comments in the code.
 
         :param mu:  initial emplacement of centroids (mu.shape[0] thus provides the -fixed- number of Gaussian components)
+        :param sigma: uniform isotropic standard deviation. Can also be modified afterwards, as self.sigma. If None, use an ad hoc initialization.
         :param use_outliers: set at True to add handling of outliers. (Can also be done afterwards, by modifying self.outliers.)
         :param spec:  dictionary (dtype and device) where the GMM model operates (see diffICP.spec)
         :param computversion: "keops" or "torch"
@@ -76,8 +77,11 @@ class GaussianMixtureUnif(Module):
         self.spec = spec
         self.mu = mu.clone().detach().to(**spec)            # Just to be sure, copy and detach from any computational graph
         self.C, self.D = self.mu.shape
-        r = self.mu.var(0).sum().sqrt().item()              # "typical radius" of the cloud of centroids. Hence, each centroid takes a "typical volume" r^D/C
-        self.sigma = 0.1 * (r / self.C**(1/self.D))         # 0.1 times the "typical radius" of each centroid
+        self.sigma = sigma
+        if self.sigma is None:
+            # Ad hoc initialization
+            r = self.mu.var(0).sum().sqrt().item()          # "typical radius" of the cloud of centroids. Hence, each centroid takes a "typical volume" r^D/C
+            self.sigma = 0.1 * (r / self.C**(1/self.D))     # 0.1 times the "typical radius" of each centroid
         self.w = torch.zeros(self.C, **spec)                # w_c = "score" de chaque composante. Son poids est pi_c = exp(w_c) / sum_{c'} exp(w_{c'})
         self.to_optimize = {                    # (Can be modified afterwards, externally, if required)
             "sigma" : True,
@@ -480,7 +484,7 @@ class GaussianMixtureUnif(Module):
 
     # --------------------------------------------------
 
-    def plot(self, *samples, bounds=None, heatmap=True, color=None, cmap=cm.RdBu, heatmap_amplification=-1, registration=None):
+    def plot(self, *samples, bounds=None, heatmap=True, log_contours=True, color=None, cmap=cm.RdBu, heatmap_amplification=-1, registration=None):
         """
         Displays the model in 2D (adapted from a KeOps tutorial).
         Boundaries for plotting can be specified in either of two ways :
@@ -551,25 +555,25 @@ class GaussianMixtureUnif(Module):
             )
 
         ### Log-contours:
-        if registration is None:
-            log_heatmap = self.log_likelihoods(grid)
-        else:
-            log_heatmap = self.log_likelihoods(reggrid) + det_grid.log()    # + or - ?
-        log_heatmap = log_heatmap.view(res, res).data.cpu().numpy()
-        scale = np.amax(np.abs(log_heatmap[:]))
-        levels = np.linspace(-scale, scale, 41)
+        if log_contours:
+                if registration is None:
+                    log_heatmap = self.log_likelihoods(grid)
+                else:
+                    log_heatmap = self.log_likelihoods(reggrid) + det_grid.log()    # + or - ?
+                log_heatmap = log_heatmap.view(res, res).data.cpu().numpy()
+                scale = np.amax(np.abs(log_heatmap[:]))
+                levels = np.linspace(-scale, scale, 41)
 
-        if color is None:
-            color = "#C8A1A1"
-
-        plt.contour(
-            log_heatmap,
-            origin="lower",
-            linewidths=1.0,
-            colors=color,
-            levels=levels,
-            extent=(xmin, xmax, ymin, ymax),
-        )
+                if color is None:
+                    color = "#C8A1A1"
+                plt.contour(
+                    log_heatmap,
+                    origin="lower",
+                    linewidths=1.0,
+                    colors=color,
+                    levels=levels,
+                    extent=(xmin, xmax, ymin, ymax),
+                )
 
     # ----------------------------------------------------------------
 
@@ -637,7 +641,8 @@ class GaussianMixtureUnif(Module):
         sample = sample.to(**self.spec)
         self.update_covariances()
         # return (-Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))/2).exp() @ self.weights()  # (keops version from the tutorial)
-        return (-((sample[:,None,:]-self.mu[None,:,:])**2).sum(-1)/(2*self.sigma**2)).exp() @ self.weights()   # plain pytorch version
+        return (-((sample[:,None,:]-self.mu[None,:,:])**2).sum(-1)/(2*self.sigma**2)).exp() @ self.weights() \
+            / (math.sqrt(2*math.pi)*self.sigma) ** self.D  # plain pytorch version
 
     def log_likelihoods(self, sample):
         """Log-density, sampled on a given point cloud."""
@@ -645,8 +650,8 @@ class GaussianMixtureUnif(Module):
         self.update_covariances()
         # K_ij = -Vi(sample).weightedsqdist(Vj(self.mu), Vj(self.params["gamma"]))/2
         # return K_ij.logsumexp(dim=1, weight=Vj(self.weights().reshape(self.C,1)))  # (keops version from the tutorial)
-        return (-((sample[:,None,:]-self.mu[None,:,:])**2).sum(-1)/(2*self.sigma**2) + self.weights_log()[None,:]).logsumexp(dim=1) # plain pytorch version
-
+        return (-((sample[:,None,:]-self.mu[None,:,:])**2).sum(-1)/(2*self.sigma**2) + self.weights_log()[None,:]).logsumexp(dim=1) \
+            - self.D * ( np.log(self.sigma) + 0.5*np.log(2*math.pi) )        # plain pytorch version
 
 
 ############################################################################################

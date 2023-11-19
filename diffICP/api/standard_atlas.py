@@ -53,7 +53,7 @@ def plot_state(PSR:DiffPSR_std, only_template=False):
 ##################################################################################
 ##################################################################################
 
-def standard_atlas(x, initial_template: torch.Tensor,
+def standard_atlas(x, initial_template=0,
                        model_parameters={},
                        numerical_options={}, optim_options={}, callback_function=None):
     '''
@@ -61,7 +61,9 @@ def standard_atlas(x, initial_template: torch.Tensor,
 
     :param x: input data points. Several possible formats, e.g., x[k][s] = cloud point from frame k and structure s
 
-    :param initial_template: initial location of the template points ;
+    :param initial_template: initial location of the template points. Can be either :
+        a torch 2d tensor : custom location of the template points ;
+        an index i : use point set x[i] as initial template ;
 
     :param model_parameters: dict with main model parameters :
         model_parameters["sigma_data"]: spatial std of the RKHS Kernel used to define the data distance, (K(x)=exp(-x^2/2*sigma^2)) ;
@@ -132,6 +134,9 @@ def standard_atlas(x, initial_template: torch.Tensor,
 
     ### Create the DiffPSR_std object that will perform the registration
 
+    if type(initial_template) is int:
+        initial_template = x[initial_template]
+
     DataKernel = GaussKernel(model_parameters["sigma_data"], D=D, spec=compspec)
 
     LMi = LDDMMModel(sigma=model_parameters["sigma_LDDMM"],         # sigma of the Gaussian kernel
@@ -173,14 +178,14 @@ def standard_atlas(x, initial_template: torch.Tensor,
             evol["w0"].append(copy.deepcopy(PSR.w0))
 
         if callback_function is not None:
-            callback_function(PSR, before_reg=True)
+            callback_function(PSR, True)
 
         if not (it == 1 and optim_options["start_by_template_opt"]):
             print("Updating diffeomorphisms (individually for each frame k).")
             PSR.Reg_opt(nmax=1)
 
         if callback_function is not None:
-            callback_function(PSR, before_reg=False)
+            callback_function(PSR, False)
 
         print("Updating (common) template.")
         PSR.Template_opt(nmax=1)
@@ -223,6 +228,10 @@ if __name__ == '__main__':
 
     # Template point set. Recommended initialization : use one of the datasets
     initial_template = x0[0]
+    # Alternatively : take Ntemplate random points from all point sets (harder : test efficiency of optimization procedure)
+    # Ntemplate = 50
+    # allpoints = torch.cat(tuple(x0), dim=0)
+    # initial_template = allpoints[torch.randperm(allpoints.shape[0])[:Ntemplate], :]
 
     model_parameters = {"sigma_data": 0.1,
                         "noise_std": 0.2,

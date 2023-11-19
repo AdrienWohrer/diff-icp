@@ -223,13 +223,13 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
             PSR.GMM_opt(max_iterations=optim_options["max_repeat_GMM"], tol=tol)
 
         if callback_function is not None:
-            callback_function(PSR, before_reg=True)
+            callback_function(PSR, True)
 
         # M step optimization for registrations (individually for each k)
         PSR.Reg_opt(tol=tol, nmax=1)
 
         if callback_function is not None:
-            callback_function(PSR, before_reg=False)
+            callback_function(PSR, False)
 
         if it > 1 and abs(PSR.FE-last_FE) < tol * abs(last_FE):
             print("Difference in Free Energy is below tolerance threshold : optimization is over.")

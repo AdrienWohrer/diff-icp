@@ -223,15 +223,6 @@ def deformetrica_atlas(x, initial_template:torch.Tensor, model_parameters,
     return PSR, iter_status, shoot_defo
 
 
-################################################################################
-################################################################################
-### Testing
-################################################################################
-################################################################################
-
-
-if __name__ == '__main__':
-    # Running as a script
 
     import os
     from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
@@ -304,3 +295,17 @@ if __name__ == '__main__':
     plot_with_template(initial_template)
 
     input()
+
+    ### Old piece of code to view the evolution of likelihood, in the case of deformetrica ; adapt if necessary
+
+    # x = range(len(iteration_status_dictionaries))
+    # # plot log-likelihood
+    # matplotlib.use('TkAgg')
+    # plt.figure()
+    # plt.plot(x, [it_data['current_log_likelihood'] for it_data in iteration_status_dictionaries],
+    #          label='log_likelihood')
+    # # plt.plot(x, [it_data['current_attachment'] for it_data in iteration_status_dictionaries], label='attachment')
+    # # plt.plot(x, [it_data['current_regularity'] for it_data in iteration_status_dictionaries], label='regularity')
+    # plt.xticks(x)
+    # plt.style.use('default')
+    # plt.legend()
