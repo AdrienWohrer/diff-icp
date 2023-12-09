@@ -13,9 +13,6 @@ import torch
 
 #pykeops.clean_pykeops()
 
-# Manual random generator seeds (to always reproduce the same point sets if required)
-torch.random.manual_seed(1234)
-
 ###################################################################
 # Import from diffICP module
 
@@ -26,6 +23,8 @@ from diffICP.core.PSR import MultiPSR, DiffPSR, AffinePSR
 from diffICP.tools.spec import defspec
 from diffICP.tools.in_out import read_point_sets
 from diffICP.visualization.visu import my_scatter
+
+import diffICP.core.calibration as calibration
 
 ##################################################################################
 ### 2d debug function : plot the current state of PSR model (GMM location, target points, trajectories etc.)
@@ -51,20 +50,23 @@ def plot_state(PSR:MultiPSR, only_GMM=False):
 ##################################################################################
 
 def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
-                       numerical_options={}, optim_options={}, callback_function=None):
+                       numerical_options={}, optim_options={}, callback_function=None, printstuff=True):
     '''
     Launch ICP-based atlas building. This function showcases the use of class DiffPSR (resp. AffinePSR).
 
     :param x0: input data points. Several possible formats, e.g., x0[k][s] = cloud point from frame k and structure s
 
     :param GMM_parameters: dict with main model parameters for the GMM part:
-        GMM_parameters["N_components"] : number of components (per structure) in the fitted GMM model ;
-        GMM_parameters["optimize_weights"] : True/False, whether to optimize GMM component weights ;
+        GMM_parameters["init_components"] : starting point for the fitted GMM models. Can be
+            - an integer N : ad hoc initialization of a GMM model with N components (for each structure)
+            - a tuple ("set",i) : use point set x[i] as initial centroids (thus also fixing the number of components)
+            - a full preexisting GMM model (whose options can then be modified by optimize_weights, fixed_sigma, etc.) ;
+        GMM_parameters["optimize_weights"] : True [default] / False, whether to optimize GMM component weights ;
+        GMM_parameters["fixed_sigma"] : None [optimize sigma] or fixed positive value for sigma [and do not optimize] ;
         GMM_parameters["outlier_weight"] : None [no outlier component] or "optimize" [optimize weight] or float value [fixed log-odds ratio] ;
-        GMM_parameters["initial_GMM"] : optional, impose a starting GMM model (overrides other parameters if present) ;
 
     :param registration_parameters: dict with main model parameters for the registration part:
-        registration_parameters["type"] : "rigid" or "similarity" or "general_affine" or "diffeomorphic" ;
+        registration_parameters["type"]: "rigid" or "similarity" or "general_affine" or "diffeomorphic" ;
         registration_parameters["lambda_LDDMM"]: regularization term of the LDDMM framework (only used if diffeomorphic) ;
         registration_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
 
@@ -79,6 +81,8 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
     :param callback_function: optional function to execute at every iteration of the optimization loop, e.g. for reporting or plotting.
         Must take the form callback_function(PSR, before_reg=False/True), with PSR the PSR object being currently optimized
 
+    :param printstuff: True/False, whether to print evolution information during optimization ;
+
     :return: PSR [main output, registration object after optim], evol [evolution of selected quantities over iterations]
     '''
 
@@ -87,16 +91,19 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
     ######################
     # Check mandatory model parameters (GMM and registration)
 
-    if GMM_parameters.get("initial_GMM") is None:
-        assert {"N_components", "optimize_weights"}.issubset(GMM_parameters.keys()), \
-            "GMM_parameters should either\n" \
-            "- define a new GMM model with values (at least) of N_components (int>0) and optimize_weights (True/False)\n" \
-            "- define key 'initial_GMM' to provide an already existing GMM model."
+    init = GMM_parameters.get("init_components")
+    assert type(init) is int or \
+           type(init) is tuple and init[0] == "set" or \
+           isinstance(init, GaussianMixtureUnif), \
+            "Wrong format for parameter GMM_parameters['init_components']. See docstring for ICP_atlas."
 
     assert GMM_parameters.get("outlier_weight") is None or \
            GMM_parameters["outlier_weight"] == "optimize" or \
            isinstance(GMM_parameters["outlier_weight"], (int,float)), \
-            "incorrect value for GMM_parameters['outlier_weight']"
+            "incorrect value for GMM_parameters['outlier_weight'].  See docstring for ICP_atlas."
+
+    assert GMM_parameters.get("fixed_sigma") is None or GMM_parameters["fixed_sigma"] > 0, \
+        "GMM_parameters['fixed_sigma'] should be absent (normal setting), or a strictly positive number"
 
     allowed_reg_types = ["rigid", "similarity", "general_affine", "diffeomorphic"]
     assert any([registration_parameters.get("type") == typ for typ in allowed_reg_types]), \
@@ -147,30 +154,72 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
 
     x0, K, S, D = read_point_sets(x0)
 
+    ### GMM model
+
+    init = GMM_parameters.get("init_components")
+    use_outliers = GMM_parameters.get("outlier_weight") is not None
+    opt_sigma = GMM_parameters.get("fixed_sigma") is None
+    opt_weights = GMM_parameters.get("optimize_weights")
+    if opt_weights is None:
+        opt_weights = True      # (default)
+    ensure_continuum = GMM_parameters.get("ensure_continuum")
+    if ensure_continuum is None:
+        ensure_continuum = False
+    reinit_mu, reinit_sigma = False, False
+
+    if type(init) is int:
+        C = init    # required number of GMM components
+        # initial value for mu = whatever (will be changed by PSR.reinitialize_GMM)
+        GMMi = GaussianMixtureUnif(torch.zeros(C,D), use_outliers=use_outliers, spec=compspec)
+        reinit_mu, reinit_sigma = True, opt_sigma
+
+    elif type(init) is tuple:
+        k = init[1]     # point set index
+        GMMi = [GaussianMixtureUnif(x0[k][s], use_outliers=use_outliers, spec=compspec) for s in range(S)]
+        reinit_mu, reinit_sigma = False, opt_sigma
+
+    elif isinstance(init, GaussianMixtureUnif):
+        GMMi = copy.deepcopy(GMM_parameters["initial_GMM"])                         # (Nota: could lead to spec clashes in some weird cases)
+        reinit_mu, reinit_sigma = False, False
+
+    # ensure list format (one GMM per structure)
+    if isinstance(GMMi, GaussianMixtureUnif):
+        GMMi = [GMMi] * S
+
+    # modify required GMM optimization parameters
+    for GMM in GMMi:
+        if isinstance(GMM_parameters.get("outlier_weight"), (int, float)):
+            GMM.outliers["eta0"] = GMM_parameters.get("outlier_weight")
+        GMM.to_optimize = {
+            "mu": True, "sigma": opt_sigma, "w": opt_weights,
+            "eta0": GMM_parameters.get("outlier_weight") == "optimize"
+        }
+        GMM.ensure_continuum = ensure_continuum
+        if not opt_sigma:
+            GMM.sigma = GMM_parameters["fixed_sigma"]
+
     ### Create the MultiPSR object (Diff or Affine) that will perform the registration
 
-    # GMM model
-    is_initial_GMM = GMM_parameters.get("initial_GMM") is not None
-    if is_initial_GMM:
-        GMMi = copy.deepcopy(GMM_parameters["initial_GMM"])                         # (Nota: could lead to spec clashes in some weird cases)
-    else:
-        C = GMM_parameters["N_components"]
-        use_outliers = GMM_parameters.get("outlier_weight") is not None
-        GMMi = GaussianMixtureUnif(torch.zeros(C,D), use_outliers=use_outliers,     # initial value for mu = whatever (will be changed by PSR algo)
-                                   spec=compspec)
-        if isinstance(GMM_parameters.get("outlier_weight"), (int,float)):
-            GMMi.outliers["eta0"] = GMM_parameters.get("outlier_weight")
-        GMMi.to_optimize = {
-            "mu" : True, "sigma" : True,
-            "w" : GMM_parameters["optimize_weights"],
-            "eta0" : GMM_parameters.get("outlier_weight") == "optimize"
-        }
-
     if is_diff:
+
+        lam = registration_parameters["lambda_LDDMM"]
+        sig = registration_parameters["sigma_LDDMM"]
+
+        # Special code for automatic calibration of lambda_LDDMM (EXPERIMENTAL!)
+        if lam == "auto":
+            if printstuff:
+                print("--------------------\nAutomatic calibration of lambda_LDDMM (warning: this is ad hoc!) ...")
+            # Calibrate lambda from repeated two_set registrations of one (arbitrary) point set on another
+            N_pairs = min(K-1, 10)
+            lambdas = torch.tensor([ calibration.calibrate_lambda_LDDMM(x0[i][0], x0[i+1][0], sig) for i in range(N_pairs) ])
+            lambdas = lambdas[torch.logical_not(lambdas.isnan())]
+            # Harmonic mean seems more appropriate given that lambda is an "inverse deformation".
+            lam = 1/((1/lambdas).mean())
+            if printstuff:
+                print(f"    lambda_LDDMM = {lam}\n--------------------")
+
         # LDDMM registration model
-        LMi = LDDMMModel(sigma= registration_parameters["sigma_LDDMM"],             # sigma of the Gaussian kernel
-                        D= D,                                                       # dimension of space
-                        lambd=  registration_parameters["lambda_LDDMM"],            # lambda of the LDDMM regularization
+        LMi = LDDMMModel(sigma = sig, D = D, lambd = lam,
                         withlogdet= True,
                         gradcomponent = numerical_options["gradcomponent_LDDMM"],   # True or False
                         computversion = numerical_options["computversion"],         # "torch" or "keops"
@@ -201,6 +250,11 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
                 "t": [],            # evol["t"][it][k] = current translation vector for frame k at iteration it
                 "GMMi": []}        # evol["GMMi"][it] = current GMM model at iteration it
 
+    # Reinitializations of GMM model, if required
+    PSR.reinitialize_GMM(do_mu=reinit_mu, do_sigma=reinit_sigma)
+
+    PSR.printstuff = printstuff
+
     #########################
     ### And optimize !
 
@@ -209,7 +263,8 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
     last_FE = None                                      # Previous value of free energy
 
     for it in range(optim_options["max_iterations"]):
-        print("ITERATION NUMBER ", it)
+        if printstuff:
+            print("ITERATION NUMBER ", it)
 
         evol["GMMi"].append(copy.deepcopy(PSR.GMMi[0]))
         if is_diff:
@@ -219,7 +274,7 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
             evol["t"].append([tk.clone().detach().cpu() for tk in PSR.t])
 
         # EM step for GMM model
-        if not (is_initial_GMM and it == 0):    # (in that case, start by optimizing registrations)
+        if it != 0 or reinit_mu:    # (if it == 0 and not reinit_mu, start by optimizing registrations)
             PSR.GMM_opt(max_iterations=optim_options["max_repeat_GMM"], tol=tol)
 
         if callback_function is not None:
@@ -232,14 +287,16 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
             callback_function(PSR, False)
 
         if it > 1 and abs(PSR.FE-last_FE) < tol * abs(last_FE):
-            print("Difference in Free Energy is below tolerance threshold : optimization is over.")
+            if printstuff:
+                print("Difference in Free Energy is below tolerance threshold : optimization is over.")
             break
 
         last_FE = PSR.FE
 
     # DONE !
     if it+1 == optim_options["max_iterations"]:
-        print("Reached maximum number of iterations (before reaching convergence threshold).")
+        if printstuff:
+            print("Reached maximum number of iterations (before reaching convergence threshold).")
 
     return PSR, evol
 
@@ -270,7 +327,7 @@ if __name__ == '__main__':
                                               sigma_GMM=0.025,
                                               sigma_LDDMM=0.1, lambda_LDDMM=1e2)
 
-    GMM_parameters = {"N_components": 20,
+    GMM_parameters = {"init_components": ("set",0), # 20,
                       "optimize_weights": True,
                       "outlier_weight": None}
 

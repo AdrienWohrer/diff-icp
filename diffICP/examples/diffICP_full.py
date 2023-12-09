@@ -16,7 +16,7 @@ plt.ion()
 import torch
 
 # Manual random generator seeds (to always reproduce the same point sets if required)
-torch.random.manual_seed(1234)
+# torch.random.manual_seed(1234)
 
 ###################################################################
 # Import from diffICP module
@@ -119,7 +119,7 @@ plt.pause(.2)
 ### GMM model
 
 C = 20
-GMMi = GaussianMixtureUnif(torch.zeros(C,2))    # initial value for mu = whatever (will be changed by PSR algo)
+GMMi = GaussianMixtureUnif(torch.zeros(C,2))    # initial value for mu = whatever (will be changed by PSR.reinitialize_GMM)
 GMMi.to_optimize = {
     "mu" : True,
     "sigma" : True,
@@ -131,9 +131,11 @@ GMMi.to_optimize = {
 LMi = LDDMMModel(sigma = 0.2,                   # sigma of the Gaussian kernel
                           D=2,                  # dimension of space
                           lambd= 5e2,           # lambda of the LDDMM regularization
-                          version = "logdet")   # "logdet", "classic" or "hybrid"
+                          version = "hybrid")   # "logdet", "classic" or "hybrid"
 
 PSR = DiffPSR(x0, GMMi, LMi)
+PSR.reinitialize_GMM()
+
 # Change support scheme ?
 PSR.set_support_scheme("grid", rho=np.sqrt(2))
 # PSR.set_support_scheme("decim", rho=0.7)

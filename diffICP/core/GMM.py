@@ -29,6 +29,7 @@ else:
     print("Warning: pykeops not installed. Consider installing it, if you are on linux")
 
 from diffICP.tools.spec import defspec
+from diffICP.tools.point_sets import intrinsic_scale
 from diffICP.visualization.visu import get_bounds, my_scatter
 
 
@@ -77,11 +78,15 @@ class GaussianMixtureUnif(Module):
         self.spec = spec
         self.mu = mu.clone().detach().to(**spec)            # Just to be sure, copy and detach from any computational graph
         self.C, self.D = self.mu.shape
+
         self.sigma = sigma
         if self.sigma is None:
             # Ad hoc initialization
             r = self.mu.var(0).sum().sqrt().item()          # "typical radius" of the cloud of centroids. Hence, each centroid takes a "typical volume" r^D/C
             self.sigma = 0.1 * (r / self.C**(1/self.D))     # 0.1 times the "typical radius" of each centroid
+            # impose a minimum default value for sigma (ugly)
+            self.sigma = max(self.sigma, 1e-6)
+
         self.w = torch.zeros(self.C, **spec)                # w_c = "score" de chaque composante. Son poids est pi_c = exp(w_c) / sum_{c'} exp(w_{c'})
         self.to_optimize = {                    # (Can be modified afterwards, externally, if required)
             "sigma" : True,
@@ -97,6 +102,10 @@ class GaussianMixtureUnif(Module):
         else:
             self.outliers = None                # Model with no outlier component
 
+        # Experimental feature (set at True to activate) : always ensure a "continuum" in the GMM, in the sense
+        # that GMM.sigma should always remain > to the "intrinsic scale" of its centroids
+        self.ensure_continuum = False
+
         self.set_computversion(computversion)
 
     # ----------------------------------------
@@ -109,6 +118,7 @@ class GaussianMixtureUnif(Module):
         G2.w = self.w.clone().detach()
         G2.to_optimize = copy.deepcopy(self.to_optimize)
         G2.outliers = copy.deepcopy(self.outliers)
+        G2.ensure_continuum = self.ensure_continuum
         return G2
 
     # ---------------------------------------
@@ -206,7 +216,7 @@ class GaussianMixtureUnif(Module):
 
     # -------------------------------
 
-    def EM_step_torch(self, X):
+    def EM_step_torch(self, X, skip_M=False):
         '''
         EM_step function (torch version). Performs ONE alternation of (E step, M step) for fitting the GMM model to the data points X.
 
@@ -217,6 +227,7 @@ class GaussianMixtureUnif(Module):
         This function updates the GMM's internal state + returns three quantities of potential interest, Y, Cfe and FE (see below).
 
         :param X: torch.tensor(N,D) - data points.
+        :param skip_M: True/False, whether to skip the M step (to compute EM-related values without performing any parameter update)
         :return:
           - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
           - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values ;
@@ -255,20 +266,23 @@ class GaussianMixtureUnif(Module):
 
         ### "M step" : update GMM parameters
 
-        if self.to_optimize["mu"]:
+        if not skip_M and self.to_optimize["mu"]:
             self.mu = softmax(lgamma_nc,dim=0).t() @ X      # shape (C,2)
 
-        if self.outliers is not None and self.to_optimize["eta0"]:
+        if not skip_M and self.outliers is not None and self.to_optimize["eta0"]:
             self.outliers["eta0"] = (lgamma0_n.logsumexp(dim=0) - lgammaT_n.logsumexp(dim=0)).item()     # eta0 = log(pi0/1-pi0) = sum_n gamma0_n / sum_n gammaT_n
 
-        if self.to_optimize["w"]:
+        if not skip_M and self.to_optimize["w"]:
             self.w = lgamma_nc.logsumexp(dim=0)                             # exp(w_c) = sum_n gamma_{nc} [GMM score without outliers]
 
-        if self.to_optimize["sigma"]:
+        if not skip_M and self.to_optimize["sigma"]:
             NDsigma2 = (gamma_nc * D2_nc).sum()
             self.sigma = ( NDsigma2/(self.D*N) ).sqrt().item()              # .item() to return a simple float
+            if self.ensure_continuum:           # (experimental)
+                self.sigma = max(self.sigma, intrinsic_scale(self.mu))
 
         ### "Quadratic targets" Y(N,D)
+
         Y = (gamma_nc[:,:,None] * self.mu[None,:,:]).sum(1).reshape(N,self.D)
 
         ### "Free energy offset" term (part of the free energy that does not depend directly on the points X)
@@ -283,13 +297,13 @@ class GaussianMixtureUnif(Module):
                             + lgamma_nc - lpi_c[None,:] )).sum(dim=1) + loggaussnorm
         if self.outliers is None:
             Cfe = Cfe_n_comp.sum()
+            FE = Cfe + (((X-Y)**2).sum(-1)).sum().item() / (2*self.sigma**2)
         else:
             gamma0_n = lgamma0_n.exp()
             gammaT_n = lgammaT_n.exp()
             lpi0, lpiT = self.log_ratio_to_proba(self.outliers["eta0"])
             Cfe = (gammaT_n * (Cfe_n_comp + lgammaT_n - lpiT) + gamma0_n * (-logJ0 + lgamma0_n - lpi0)).sum().item()
-
-        FE = Cfe + (gammaT_n * ((X-Y)**2).sum(-1)).sum().item() / (2*self.sigma**2)
+            FE = Cfe + (gammaT_n * ((X-Y)**2).sum(-1)).sum().item() / (2*self.sigma**2)
 
         return Y, Cfe, FE
 
@@ -315,11 +329,12 @@ class GaussianMixtureUnif(Module):
         for i in range(max_iterations):
             Y, Cfe, FE = self.EM_step(X)
             if last_FE is not None and tol is not None and abs(FE-last_FE) < tol * abs(last_FE):
-                print(f"GMM optimization - reached required tolerance of {tol} in {i+1} EM steps")
+                # print(f"GMM optimization - reached required tolerance of {tol} in {i+1} EM steps")
                 return Y, Cfe, FE, i+1
             last_FE = FE
         print(f"GMM optimization - reached maximum number of iterations : {max_iterations}")
         return Y, Cfe, FE, i+1
+
 
     #####################################################################################
     ###
@@ -392,6 +407,8 @@ class GaussianMixtureUnif(Module):
                 # NDsigma2 = lgam_nc.sumsoftmaxweight(D2_nc, axis=1).sum()
                 NDsigma2 = lgam_nc.logsumexp(weight=D2_nc, axis=0).exp().sum()  # marginally faster (~= -10% when N=10000)
                 self.sigma = (NDsigma2 / (self.D * N)).sqrt().item()  # (.item() to return a simple float)
+                if self.ensure_continuum:           # (experimental)
+                    self.sigma = max(self.sigma, intrinsic_scale(self.mu))
 
         # ------------------------------------------------------------
 
@@ -434,7 +451,7 @@ class GaussianMixtureUnif(Module):
         # ---------------------------------------------------------------
         # All three operations (E+M+compute Y and Cfe). Does the same thing as EM_step_torch().
 
-        def EM_step_keops(self, X):
+        def EM_step_keops(self, X, skip_M=False):
             '''
             EM_step function (keops version). Performs ONE alternation of (E step, M step) for fitting the GMM model to the data points X.
 
@@ -445,13 +462,16 @@ class GaussianMixtureUnif(Module):
             This function updates the GMM's internal state + returns three quantities of potential interest, Y, Cfe and FE (see below).
 
             :param X: torch.tensor(N,D) - data points.
+            :param skip_M: True/False, whether to skip the M step (to compute EM-related values without performing any parameter update)
             :return:
               - Y(N,D) : updated "quadratic target" associated to each data point : y_n = sum_c ( gamma_{nc}*mu_c ) ;
               - Cfe (number) : updated "free energy offset", i.e., the terms in EM free energy which do not involve (directly) the input X values ;
               - FE (number) : updated free energy, FE = Cfe + sum_n (1-gamma0_n) * (x_n-y_n)**2 / (2*sigma**2)
             '''
+
             log_gammas = self.E_step_keops(X)
-            self.M_step_keops(X, *log_gammas)
+            if not skip_M:
+                self.M_step_keops(X, *log_gammas)
             Y, Cfe = self.EM_values_keops(*log_gammas)
             if self.outliers is not None:
                 gammaT_n = log_gammas[2].exp()
@@ -469,12 +489,12 @@ class GaussianMixtureUnif(Module):
 
     def pi(self):
         '''Return the vector of GMM component weights pi_c (without outliers).'''
-        return softmax(self.w)
+        return softmax(self.w, dim=0)
 
     # ------------------------------------------------
 
     def get_sample(self, N):
-        '''Generate a random sample of N points from the GMM distribution.'''
+        '''Generate a random sample of N points from the GMM distribution. (Without an outlier term.)'''
         samp = self.sigma * torch.randn(N, self.D, **self.spec)     # random normal samples
         # center around (random) components
         c = torch.distributions.categorical.Categorical(logits=self.w).sample((N,))
@@ -654,6 +674,20 @@ class GaussianMixtureUnif(Module):
             - self.D * ( np.log(self.sigma) + 0.5*np.log(2*math.pi) )        # plain pytorch version
 
 
+#########################################################################
+# Experimental function : SYMMETRIC KL DIVERGENCE between GMM distributions
+#########################################################################
+
+# (Experimental. For the moment, this is approximated with basic Monte Carlo sampling)
+def symm_kl_div(GMM_X: GaussianMixtureUnif, GMM_Y: GaussianMixtureUnif, N_sample=1000):
+    X = GMM_X.get_sample(N_sample)
+    klXY = (GMM_X.log_likelihoods(X) - GMM_Y.log_likelihoods(X)).mean()
+    Y = GMM_Y.get_sample(N_sample)
+    klYX = (GMM_Y.log_likelihoods(Y) - GMM_X.log_likelihoods(Y)).mean()
+    print(klXY + klYX)
+    return klXY + klYX
+
+
 ############################################################################################
 ############################################################################################
 ###
@@ -705,6 +739,13 @@ if __name__ == '__main__':
             "w" : True,
             "eta0" : True
         }
+
+        # Computing EM values, without any update
+        GMM.set_computversion("torch")
+        print(GMM.EM_step(x, skip_M=True))
+        GMM.set_computversion("keops")
+        print(GMM.EM_step(x, skip_M=True))
+
         n = 0
         start = time.time()
         while n<1000:

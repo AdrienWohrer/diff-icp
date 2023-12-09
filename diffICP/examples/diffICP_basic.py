@@ -86,7 +86,7 @@ PSR.set_support_scheme("grid", rho=np.sqrt(2))
 ### Point Set Registration model : affine version
 
 # PSR = AffinePSR(x0, GMMg, AffineModel(D=2, version = 'similarity'))
-# PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'general_affine'))
+# PSR = AffinePSR(x0, GMMi, AffineModel(D=2, version = 'general_affine'))
 
 # To change sigma also and optimize it (as in classic 2-point set probablistic ICP)
 if sigma_start is not None:

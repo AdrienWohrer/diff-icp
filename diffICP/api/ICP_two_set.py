@@ -15,9 +15,6 @@ import torch
 
 #pykeops.clean_pykeops()
 
-# Manual random generator seeds (to always reproduce the same point sets if required)
-torch.random.manual_seed(1234)
-
 ###################################################################
 # Import from diffICP module
 
@@ -30,6 +27,10 @@ from diffICP.tools.in_out import read_point_sets
 from diffICP.visualization.visu import my_scatter, get_bounds, on_top
 from diffICP.visualization.grid import Gridlines
 from diffICP.tools.spec import defspec
+
+# "import xxxx" avoids circular imports
+import diffICP.core.calibration as calibration
+
 
 ##################################################################################
 ### Default visualization function : plot the current state of PSR model (GMM location, target points, trajectories etc.)
@@ -73,7 +74,7 @@ def plot_state(PSR: MultiPSR, bounds, plot_GMM=True, plot_targets=True, plot_gri
 ##################################################################################
 
 def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
-                       numerical_options={}, optim_options={}, plotstuff=True):
+                       numerical_options={}, optim_options={}, plotstuff=True, printstuff=True):
     '''
     Launch ICP-based two-set registration. This function showcases the use of class DiffPSR (resp. AffinePSR).
 
@@ -81,13 +82,13 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
     :param xB: second point set ("template", serves as centroids of a GMM model).
 
     :param GMM_parameters: dict with main model parameters for the GMM part :
-        GMM_parameters["sigma"] (float) : initial value of GMM sigma parameter ;
+        GMM_parameters["sigma"] : float (initial value of GMM sigma parameter) or None (ad hoc initialization) ;
         GMM_parameters["optimize_sigma"] : True/False, whether to optimize GMM sigma parameter ;
         GMM_parameters["outlier_weight"] : None [no outlier component] or "optimize" [optimize weight] or float value [fixed log-odds ratio] ;
 
     :param registration_parameters: dict with main model parameters for the registration part :
         registration_parameters["type"] : "rigid" or "similarity" or "general_affine" or "diffeomorphic" ;
-        registration_parameters["lambda_LDDMM"]: regularization term of the LDDMM framework (only used if diffeomorphic) ;
+        registration_parameters["lambda_LDDMM"]: regularization term of the LDDMM framework (only used if diffeomorphic). "auto" for ad hoc calibration ;
         registration_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
 
     :param numerical_options: dict with various numerical details of the algorithm :
@@ -99,6 +100,7 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
     :param optim_options: numerical options for the optimization procedure (see code below) ;
 
     :param plotstuff: True/False, whether to plot model evolution during optimization (only in 2D) ;
+    :param printstuff: True/False, whether to print evolution information during optimization ;
     :return: PSR [main output, registration object after optim], evol [evolution of selected quantities over iterations]
     '''
 
@@ -162,8 +164,7 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
 
     # GMM model
     use_outliers = GMM_parameters.get("outlier_weight") is not None
-    GMMi = GaussianMixtureUnif(xB, use_outliers=use_outliers)
-    GMMi.sigma = GMM_parameters["sigma"]
+    GMMi = GaussianMixtureUnif(xB, use_outliers=use_outliers, sigma=GMM_parameters["sigma"])
     if isinstance(GMM_parameters.get("outlier_weight"), (int, float)):
         GMMi.outliers["eta0"] = GMM_parameters["outlier_weight"]
     GMMi.to_optimize = {
@@ -174,14 +175,24 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
     }
 
     if is_diff:
+
+        lam = registration_parameters["lambda_LDDMM"]
+        sig = registration_parameters["sigma_LDDMM"]
+
+        # Special code for automatic calibration of lambda_LDDMM (EXPERIMENTAL!)
+        if lam == "auto":
+            if printstuff:
+                print("Automatic calibration of lambda_LDDMM...")
+            lam = calibration.calibrate_lambda_LDDMM(xA, xB, sig)
+            if printstuff:
+                print(f"    lambda_LDDMM = {lam}")
+
         # LDDMM registration model
-        LMi = LDDMMModel(sigma= registration_parameters["sigma_LDDMM"],             # sigma of the Gaussian kernel
-                        D= D,                                                       # dimension of space
-                        lambd=  registration_parameters["lambda_LDDMM"],            # lambda of the LDDMM regularization
-                        withlogdet= True,
+        LMi = LDDMMModel(sigma = sig, D = D, lambd = lam,
+                        withlogdet = True,
                         computversion = numerical_options["computversion"],         # "torch" or "keops"
-                        scheme= numerical_options["integration_scheme_LDDMM"],      # "Euler" (faster) or "Ralston" (more precise)
-                        nt= numerical_options["integration_nt_LDDMM"])
+                        scheme = numerical_options["integration_scheme_LDDMM"],      # "Euler" (faster) or "Ralston" (more precise)
+                        nt = numerical_options["integration_nt_LDDMM"])
 
         PSR = DiffPSR(xA, GMMi, LMi)
 
@@ -194,6 +205,7 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
                 "GMMi": []}      # evol["GMMi"][it] = current GMM model at iteration it
 
     else:
+
         # Affine registration model
         AffMi = AffineModel(D=D, version=registration_parameters["type"],
                             withlogdet=True,
@@ -207,6 +219,8 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
                 "GMMi": []}        # evol["GMMi"][it] = current GMM model at iteration it
 
     #########################
+
+    PSR.printstuff = printstuff
 
     if plotstuff:
         plt.figure()    # Figure 1 : basic point sets
@@ -226,7 +240,8 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
     last_FE = None                                      # Previous value of free energy
 
     for it in range(optim_options["max_iterations"]):
-        print("ITERATION NUMBER ", it)
+        if printstuff:
+            print("ITERATION NUMBER ", it)
 
         evol["GMMi"].append(copy.deepcopy(PSR.GMMi[0]))
         if is_diff:
@@ -248,13 +263,14 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
             plot_state(PSR, bounds)
 
         if it > 1 and abs(PSR.FE-last_FE) < tol * abs(last_FE):
-            print("Difference in Free Energy is below tolerance threshold : optimization is over.")
+            if printstuff:
+                print("Difference in Free Energy is below tolerance threshold : optimization is over.")
             break
 
         last_FE = PSR.FE
 
     # DONE !
-    if it+1 == optim_options["max_iterations"]:
+    if printstuff and it+1 == optim_options["max_iterations"]:
         print("Reached maximum number of iterations (before reaching convergence threshold).")
 
     return PSR, evol
@@ -287,7 +303,7 @@ if __name__ == '__main__':
 
     # Registration parameters
     registration_parameters = {"type": "diffeomorphic",     # or "similarity", ...
-                        "lambda_LDDMM": 200,        # (only used in "diffeomorphic" case, but can be left anyway)
+                        "lambda_LDDMM": "auto",        # (only used in "diffeomorphic" case, but can be left anyway)
                         "sigma_LDDMM": 0.2}         # (idem)
 
     # registration_parameters = {"type": "similarity"}      # affine version

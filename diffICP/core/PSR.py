@@ -65,6 +65,9 @@ class MultiPSR:
 
         self.dataspec, self.compspec = dataspec, compspec
 
+        # Verbose mode ?
+        self.printstuff = True
+
         ### Read input point sets and various dimensions.
         #   x: point sets, now cast in the format x[k][s] ;
         #   self.K = number of frames
@@ -108,15 +111,6 @@ class MultiPSR:
         if any(gmm.spec != compspec for gmm in self.GMMi):
             raise ValueError("Spec (dtype+device) error : GMM 'spec' and multiPSR 'compspec' attributes should be the same")
 
-        for s in range(self.S):
-            # all (unwarped) points associated to structure s:
-            allx0s = torch.cat(tuple(self.x0[:,s]), dim=0)
-            if self.GMMi[s].to_optimize["mu"]:
-                # initial centroids = close to center of mass of all (unwarped) points
-                self.GMMi[s].mu = allx0s.mean(dim=0) + 0.05 * allx0s.std() * torch.randn(self.GMMi[s].C, self.D, **self.dataspec)
-            if self.GMMi[s].to_optimize["sigma"]:
-                self.GMMi[s].sigma = 0.25 * allx0s.std()  # ad hoc
-
         # The FULL EM free energy writes
         #   F = \sum_{k,s} quadloss[k,s] + \sum_k regloss[k] + \sum_s Cfe[s],
         # with Cfe the "free energy offset term" associated to each GMM model's current state (see GMM.py)
@@ -126,19 +120,56 @@ class MultiPSR:
         self.quadloss = np.zeros((self.K,self.S))               # updated both after GMM_opt and Reg_opt
         self.FE = None                                          # keep a trace of current value of free energy
 
+        self.update_GMM_targets()                               # initialize self.y, self.Cfe, self.quadloss and self.FE
+
         # Store last shoot for each frame (for plotting, etc.)
         self.shoot = [None] * self.K
 
+
+    ################################################################
+    ################################################################
+    # Other initialization-related functions
+
     # Hack to ensure a correct value of spec when Unpickling. See spec.CPU_Unpickler and
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
+
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.dataspec = defspec
         self.compspec = defspec
 
+    # "Smart reinitialization" of the GMM components
 
-    ###################################################################
-    ### More user-friendly accessors to the point sets
+    def reinitialize_GMM(self, s=None, do_mu=True, do_sigma=True):
+        '''
+        Re-initialize GMM components in a way that is adapted to future EM optimization from the data.
+        This is kept separated from __init__() to provide more flexibility (e.g. start from pre-existing GMM model).
+
+        :param s: index of the GMM (structure) to reinitialize. None (default) reinitializes all structures.
+        :param do_mu: re-initialize mu (except if to_optimize["mu"]=False)
+        :param do_sigma: re-initialize sigma (except if to_optimize["sigma"]=False)
+        :return: None
+        '''
+
+        if s is None:
+            slist = range(self.S)
+        else:
+            slist = [s]
+        for s in slist:
+            # all (unwarped) points associated to structure s:
+            allx0s = torch.cat(tuple(self.x0[:,s]), dim=0)
+            if do_mu and self.GMMi[s].to_optimize["mu"]:
+                # initial centroids = close to center of mass of all (unwarped) points
+                self.GMMi[s].mu = allx0s.mean(dim=0) + 0.05 * allx0s.std() * torch.randn(self.GMMi[s].C, self.D, **self.dataspec)
+            if do_sigma and self.GMMi[s].to_optimize["sigma"]:
+                self.GMMi[s].sigma = 0.25 * allx0s.std()  # ad hoc
+
+        self.update_GMM_targets()                               # update self.y, self.Cfe, self.quadloss and self.FE accordingly
+
+
+    ################################################################
+    ################################################################
+    ### User-friendly accessors to the point sets
 
     def get_data_points(self, k=0, s=0):
         '''
@@ -161,6 +192,27 @@ class MultiPSR:
 
     ################################################################
     ################################################################
+    ### Various update functions for parmeter-dependent quantities
+
+    def update_GMM_targets(self):
+        '''
+        Recompute GMM quadratic targets self.y (plus self.Cfe, self.quadloss, self.FE) without doing any actual
+        parameter update of the GMM model. This is only useful at the initialization of the algorithm, if one wants to
+        start by optimizing the *registrations* first, instead of the GMM models first.
+        '''
+
+        for s in range(self.S):
+            allx1s = torch.cat(tuple(self.x1[:, s]), dim=0).to(**self.compspec)
+            allys, self.Cfe[s], _ = self.GMMi[s].EM_step(allx1s, skip_M=True)
+            # re-assign targets to corresponding frames
+            last = 0
+            for k in range(self.K):
+                first, last = last, last + self.N[k, s]
+                self.y[k, s] = allys[first:last].to(**self.dataspec)
+                self.update_quadloss(k, s)
+        self.update_FE()
+
+    ################################################################
 
     def update_quadloss(self, k, s):
         '''
@@ -169,17 +221,16 @@ class MultiPSR:
 
         self.quadloss[k,s] = ((self.x1[k,s]-self.y[k,s])**2).sum() / (2 * self.GMMi[s].sigma ** 2)
 
-
-    ################################################################
     ################################################################
 
-    def update_FE(self, message=""):
+    def update_FE(self, message=None):
         '''
         Recompute and store current value of free energy.
         '''
 
         FE = sum(self.Cfe) + sum(self.regloss) + self.quadloss.sum().item()
-        print(message.ljust(70)+f"Total free energy = {FE:.8}")
+        if self.printstuff and message is not None:
+            print(message.ljust(70)+f"Total free energy = {FE:.8}")
         if self.FE is not None and FE > self.FE:
             print("WARNING: measured increase in free energy ! Should not happen.")
         self.FE = FE
@@ -197,9 +248,6 @@ class MultiPSR:
             allx1s = torch.cat(tuple(self.x1[:,s]), dim=0).to(**self.compspec)
 
             allys, self.Cfe[s], _, i = self.GMMi[s].EM_optimization(allx1s, max_iterations=max_iterations, tol=tol)
-            # for i in range(repeat):
-            #     # Possibly repeat several GMM loops on every iteration (since it's faster than LDDMM)
-            #     allys, self.Cfe[s] = self.GMMi[s].EM_step(allx1s)
 
             # re-assign targets to corresponding frames
             last = 0
@@ -212,17 +260,21 @@ class MultiPSR:
 
             # nota: self.y is guaranteed to have no gradient attached (important for LDDMM QuadLoss below)
 
-            # keep track of full free energy (to check that it only decreases!)
             message = f"GMM optim (structure {s}) : {i} EM steps"
             if self.GMMi[s].outliers:
                 p0 = 1 / (1 + np.exp(-self.GMMi[s].outliers["eta0"]))
                 message += f", p_outlier={p0:.4}"
             else:
                 message += "."
-            if self.FE is not None or s == self.S-1:        # (ugly)
-                self.update_FE(message = message)
-            else:
-                print(message)
+
+            # keep track of full free energy (to check that it only decreases!)
+            self.update_FE(message = message)
+
+
+    ################################################################
+    ################################################################
+
+
 
     ################################################################
     ################################################################
@@ -412,7 +464,8 @@ class DiffPSR(MultiPSR):
                 # Report amount of decimation for each frame k (across all structures s)
                 Ndecim = sum([len(supp_ids[k,s]) for s in range(self.S)])
                 Pdecim = Ndecim / sum([self.N[k,s] for s in range(self.S)])
-                print(f"Decimation, frame {k} : {Ndecim} support points ({Pdecim:.0%} of original sets)")
+                if self.prinstuff:
+                    print(f"Decimation, frame {k} : {Ndecim} support points ({Pdecim:.0%} of original sets)")
                 # And thus
                 self.q0[k] = torch.cat(tuple(self.x0[k,s][supp_ids[k,s]] for s in range(self.S)), dim=0).to(**self.compspec).contiguous()
 
@@ -447,8 +500,8 @@ class DiffPSR(MultiPSR):
         Partial optimization, LDDMM part (for frame k).
         Nota: only works for an LDDMM Gaussian kernel.
 
-        :return : the data loss function to use in LDDMM optimization for frame k. That is, (q,x) --> dataloss(q,x)
-            with q all support points in frame k, and x all data points in frame k, concatenated across all structures s.
+        :return : the data loss function to use in LDDMM optimization for frame k. That is, x --> dataloss(x)
+            with x all data points in frame k, concatenated across all structures s.
         '''
 
         # quadratic targets (make a contiguous copy to optimize keops reductions)
@@ -457,15 +510,8 @@ class DiffPSR(MultiPSR):
         # associated sigma values (ugly because depends on s)
         sig2 = torch.cat(tuple(self.GMMi[s].sigma**2 * torch.ones(self.N[k,s]) for s in range(self.S))).to(**self.compspec).contiguous()
 
-        if self.support_scheme is None:
-            # (default) dense scheme : support_points q = data_points x
-            def dataloss_func(q,x):
-                return ( (q - y)**2 / (2*sig2[:,None]) ).sum()
-
-        else:
-            # other support scheme : support_points q != data_points x
-            def dataloss_func(q,x):
-                return ( (x - y)**2 / (2*sig2[:,None]) ).sum()
+        def dataloss_func(x):
+            return ( (x - y)**2 / (2*sig2[:,None]) ).sum()
 
         return dataloss_func
 
@@ -494,7 +540,7 @@ class DiffPSR(MultiPSR):
                 self.a0[k], self.shoot[k], self.regloss[k], datal, isteps, change = \
                     self.LMi.Optimize(self.QuadLossFunctor(k), self.q0[k], self.a0[k], self.allx0[k], tol=tol, nmax=nmax)
                 # Recover warped data points
-                allx1k = self.shoot[k][-1][3]
+                allx1k = self.shoot[k][-1][-1]
 
             # Re-assign to corresponding structures
             last = 0
@@ -513,7 +559,7 @@ class DiffPSR(MultiPSR):
             if self.support_scheme is not None:
                 Rcoverwarning = 2.0                       # (hard-modify here if necessary)
                 for t in range(len(self.shoot[k])):
-                    qk, xk = self.shoot[k][t][0], self.shoot[k][t][3]
+                    qk, xk = self.shoot[k][t][0], self.shoot[k][t][-1]
                     uncoveredxk = self.LMi.Kernel.check_coverage(xk, qk, Rcoverwarning)
                     if uncoveredxk.any():
                         print(f"WARNING : shooting, time step {t} : {uncoveredxk.sum()} uncovered points ({uncoveredxk.sum()/xk.shape[0]:.2%})")

@@ -20,6 +20,8 @@ from diffICP.core.GMM import GaussianMixtureUnif
 from diffICP.tools.spec import defspec
 from diffICP.tools.in_out import read_point_sets
 from diffICP.tools.kernel import GaussKernel
+from diffICP.tools.point_sets import intrinsic_scale
+
 from diffICP.visualization.visu import my_scatter
 
 from diffICP.core.PSR_standard import DiffPSR_std
@@ -29,14 +31,17 @@ from diffICP.core.PSR_standard import DiffPSR_std
 ### Debug function : plot the current state of PSR model (template location, target points, trajectories etc.)
 
 matplotlib.use('TkAgg')
-def plot_state(PSR:DiffPSR_std, only_template=False):
+def plot_state(PSR:DiffPSR_std, sigma=None, only_template=False):
     plt.clf()
     y1 = PSR.y1[:, 0]   # warped templates
     x = PSR.x[:, 0]    # data points
     # utilise un GMM uniquement pour la représentation de y_template
     GMMr = GaussianMixtureUnif(PSR.y0[0])
-    # GMMr.sigma = DataKernel.sigma               # choix logique, mais pas optimal pour visualiser lorsque sigma est grand
-    GMMr.sigma = 0.025  # ad hoc but better visualization
+    if sigma is not None:
+        GMMr.sigma = sigma
+    else:
+        # GMMr.sigma = PSR.DataKernel.sigma               # choix logique, mais pas optimal pour visualiser lorsque sigma est grand
+        GMMr.sigma = intrinsic_scale(PSR.y0[0])     # ad hoc but better visualization
 
     GMMr.plot(*x, *y1)
     #        my_scatter(*y1[0:min(5, PSR.K)], alpha=.6)
@@ -66,7 +71,8 @@ def standard_atlas(x, initial_template=0,
         an index i : use point set x[i] as initial template ;
 
     :param model_parameters: dict with main model parameters :
-        model_parameters["sigma_data"]: spatial std of the RKHS Kernel used to define the data distance, (K(x)=exp(-x^2/2*sigma^2)) ;
+        model_parameters["sigma_data"]: spatial std of the RKHS Kernel used to define the data distance, (K(x)=exp(-x^2/2*sigma^2)).
+            If None, automatically use a reference value based on the 'intrinsic scale' of the point sets ;
         model_parameters["noise_std"]: scaling parameter of the data loss term, so Loss = \sum_s rkhs_distance(s) / noise_std[s]^2 ;
         model_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
         model_parameters["use_template_weights"]: associate inhomogeneous scalar weights to the template points, and optimize them too ;
@@ -115,7 +121,7 @@ def standard_atlas(x, initial_template=0,
     set_default(numerical_options, "compspec", defspec)                    # 'compspec' = device for computations (gpu vs cpu)
     set_default(numerical_options, "dataspec", defspec)                    # 'dataspec' = device for storage (gpu vs cpu)
 
-    set_default(optim_options, "max_iterations", 25)            # Number of global loop iterations (fixed, for the moment !)
+    set_default(optim_options, "max_iterations", 25)            # Maximum number of global loop iterations
     set_default(optim_options, "convergence_tolerance", 1e-3)   # Tolerance parameter (TODO differentiate between global loop and single optimizations ?)
     set_default(optim_options, "start_by_template_opt", False)  # can drastically change the resulting convergence !
 
@@ -131,6 +137,10 @@ def standard_atlas(x, initial_template=0,
     #   D = dimension of space
 
     x, K, S, D = read_point_sets(x)
+
+    # Special code for sigma_data : compute from input point sets if necessary
+    if model_parameters["sigma_data"] is None:
+        model_parameters["sigma_data"] = sum(intrinsic_scale(x[k][s]) for k in range(K) for s in range(S)) / (K*S)
 
     ### Create the DiffPSR_std object that will perform the registration
 
@@ -227,7 +237,7 @@ if __name__ == '__main__':
                                               sigma_LDDMM=0.1, lambda_LDDMM=1e2)
 
     # Template point set. Recommended initialization : use one of the datasets
-    initial_template = x0[0]
+    initial_template = 0        # use point set 0
     # Alternatively : take Ntemplate random points from all point sets (harder : test efficiency of optimization procedure)
     # Ntemplate = 50
     # allpoints = torch.cat(tuple(x0), dim=0)
@@ -239,8 +249,8 @@ if __name__ == '__main__':
                         "use_template_weights": False
                         }
 
-    optim_options = {'max_iterations': 15,              # Number of global loop iterations (fixed, for the moment)
-                     'convergence_tolerance': 1e-4,     # for each optimization in the global loop (for the moment)
+    optim_options = {'max_iterations': 15,              # Maximum number of global loop iterations
+                     'convergence_tolerance': 1e-3,     # Relative tolerance parameter for convergence
                      'start_by_template_opt': False     # can drastically change the resulting convergence !
                      }
 

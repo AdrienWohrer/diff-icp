@@ -17,6 +17,7 @@ from matplotlib.ticker import FormatStrFormatter
 import torch
 
 from diffICP.core.LDDMM import LDDMMModel
+from diffICP.core.affine import AffineModel
 from diffICP.core.GMM import GaussianMixtureUnif
 
 from diffICP.tools.spec import defspec
@@ -24,7 +25,7 @@ from diffICP.tools.kernel import GaussKernel
 from diffICP.visualization.visu import my_scatter, get_bounds, on_top
 from diffICP.visualization.grid import Gridlines
 
-from diffICP.core.PSR_standard import MultiPSR_std, DiffPSR_std
+from diffICP.core.PSR_standard import MultiPSR_std, DiffPSR_std, AffinePSR_std
 
 ##################################################################################
 ### Default visualization function : plot the current state of PSR model (template location, target points, trajectories etc.)
@@ -59,7 +60,7 @@ def plot_state(PSR: MultiPSR_std, bounds, plot_gridlines=True):
 ##################################################################################
 
 def standard_two_set(xA, xB, model_parameters: dict,
-                       numerical_options={}, optim_options={}, plotstuff=True):
+                       numerical_options={}, optim_options={}, plotstuff=True, printstuff=True):
     '''
     Launch standard LDDMM two-set registration, using personal reimplementation in PSR_standard.py.
 
@@ -67,9 +68,10 @@ def standard_two_set(xA, xB, model_parameters: dict,
     :param xB: second point set ("data", fixed).
 
     :param model_parameters: dict with main model parameters :
+        model_parameters["type"] : "rigid" or "similarity" or "general_affine" or "diffeomorphic" ;
         model_parameters["sigma_data"]: spatial std of the RKHS Kernel used to define the data distance, (K(x)=exp(-x^2/2*sigma^2)) ;
         model_parameters["noise_std"]: scaling parameter of the data loss term, so Loss = \sum_s rkhs_distance(s) / noise_std[s]^2 ;
-        model_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
+        model_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms (only used when type='diffeomorphic') ;
 
     :param numerical_options: dict with various numerical details of the algorithm :
         numerical_options["computversion"] : "keops" or "torch" ;
@@ -79,6 +81,7 @@ def standard_two_set(xA, xB, model_parameters: dict,
     :param optim_options: numerical options for the optimization procedure (see code below) ;
 
     :param plotstuff: True/False, whether to plot model evolution during optimization (only in 2D) ;
+    :param printstuff: True/False, whether to print evolution information during optimization ;
     :return: PSR [main output, registration object after optim], evol [evolution of selected quantities over iterations]
     '''
 
@@ -88,18 +91,26 @@ def standard_two_set(xA, xB, model_parameters: dict,
     ######################
     # Check mandatory model parameters
 
-    assert {"sigma_data","noise_std","sigma_LDDMM"}.issubset(model_parameters.keys()), \
-        "model_parameters should at least define values of sigma_data, noise_std and sigma_LDDMM"
+    is_diff = model_parameters["type"] == "diffeomorphic"
+    if is_diff:
+        assert {"sigma_data", "noise_std", "sigma_LDDMM"}.issubset(model_parameters.keys()), \
+            "if type=diffeomorphic, model_parameters should at least define values of sigma_data, noise_std and sigma_LDDMM"
+    else:
+        assert {"type", "sigma_data"}.issubset(model_parameters.keys()), \
+            "model_parameters should at least define values of 'type' and 'sigma_data' (and more if type=diffeomorphic)"
 
     ######################
     # Set default values for optional arguments (numerical etc.)
 
+    model_parameters = model_parameters.copy()
     numerical_options = numerical_options.copy()
     optim_options = optim_options.copy()
 
     def set_default(dico, key, value):
         if dico.get(key) is None:
             dico[key] = value
+
+    set_default(model_parameters, "noise_std", 1)   # (in case of affine registration)
 
     default_support_scheme = {
                 "scheme": "grid",   # "dense", "grid" or "decim"
@@ -126,20 +137,40 @@ def standard_two_set(xA, xB, model_parameters: dict,
 
     DataKernel = GaussKernel(model_parameters["sigma_data"], D=D)
 
-    LMi = LDDMMModel(sigma=model_parameters["sigma_LDDMM"],         # sigma of the Gaussian kernel
-                     D=D,                       # dimension of space
-                     lambd=2.0,                 # Always 2 to match the "standard" definition in deformetrica.
-                     version="classic",
-                     computversion=numerical_options["computversion"],      # "torch" or "keops"
-                     scheme=numerical_options["integration_scheme_LDDMM"],  # "Euler" (faster) or "Ralston" (more precise)
-                     nt=numerical_options["integration_nt_LDDMM"])
+    if is_diff:
 
-    PSR = DiffPSR_std(xB, xA,
-                      model_parameters["noise_std"], LMi, DataKernel, template_weights=False)
+        LMi = LDDMMModel(sigma=model_parameters["sigma_LDDMM"],         # sigma of the Gaussian kernel
+                         D=D,                       # dimension of space
+                         lambd=2.0,                 # Always 2 to match the "standard" definition in deformetrica.
+                         version="classic",
+                         computversion=numerical_options["computversion"],      # "torch" or "keops"
+                         scheme=numerical_options["integration_scheme_LDDMM"],  # "Euler" (faster) or "Ralston" (more precise)
+                         nt=numerical_options["integration_nt_LDDMM"])
 
-    supp_scheme = numerical_options["support_LDDMM"]["scheme"]
-    if supp_scheme != "dense":
-        PSR.set_support_scheme(**numerical_options["support_LDDMM"])
+        PSR = DiffPSR_std(xB, xA,
+                          model_parameters["noise_std"], LMi, DataKernel, template_weights=False)
+
+        supp_scheme = numerical_options["support_LDDMM"]["scheme"]
+        if supp_scheme != "dense":
+            PSR.set_support_scheme(**numerical_options["support_LDDMM"])
+
+        # for storing results
+        evol = {"a0": [],        # evol["a0"][it][k] = current a0 tensor(Nk[k],2) at iteration it
+                "y0": []}        # evol["y0"][it] = current template point set PSR.y0 at iteration it
+
+    else:
+
+        # Affine registration model
+        AffMi = AffineModel(D=D, version=model_parameters["type"],
+                            withlogdet=False,
+                            with_t=True)
+        PSR = AffinePSR_std(xB, xA,
+                            model_parameters["noise_std"], AffMi, DataKernel, template_weights=False)
+
+        # for storing results
+        evol = {"M": [],            # evol["M"][it][k] = current registration matrix for frame k at iteration it
+                "t": [],            # evol["t"][it][k] = current translation vector for frame k at iteration it
+                "y0": []}        # evol["y0"][it] = current template point set PSR.y0 at iteration it
 
     ########################
 
@@ -156,19 +187,20 @@ def standard_two_set(xA, xB, model_parameters: dict,
     #########################
     ### And optimize !
 
-    # for storing results
-    evol = {"a0": [],        # evol["a0"][it][k] = current a0 tensor(Nk[k],2) at iteration it
-            "y0": []}        # evol["y0"][it] = current template point set PSR.y0 at iteration it
-
     tol = optim_options["convergence_tolerance"]
 
     last_E = None                                      # Previous value of energy
 
-    for it in range(optim_options["max_iterations"]):   # TODO add break condition on global loop
-        print("ITERATION NUMBER ", it)
+    for it in range(optim_options["max_iterations"]):
+        if printstuff:
+            print("ITERATION NUMBER ", it)
 
         evol["y0"].append(copy.deepcopy(PSR.y0))
-        evol["a0"].append([a0k.clone().detach().cpu() for a0k in PSR.a0])
+        if is_diff:
+            evol["a0"].append([a0k.clone().detach().cpu() for a0k in PSR.a0])
+        else:
+            evol["M"].append([Mk.clone().detach().cpu() for Mk in PSR.M])
+            evol["t"].append([tk.clone().detach().cpu() for tk in PSR.t])
 
         if plotstuff:
             plot_state(PSR, bounds)
@@ -177,12 +209,15 @@ def standard_two_set(xA, xB, model_parameters: dict,
         PSR.Reg_opt(nmax=optim_options["nmax_per_iter"], tol=tol)
 
         if it > 1 and abs(PSR.E-last_E) < tol * abs(last_E):
-            print("Difference in energy is below tolerance threshold : optimization is over.")
+            if printstuff:
+                print("Difference in energy is below tolerance threshold : optimization is over.")
             break
 
         last_E = PSR.E
 
     # DONE !
+    if printstuff and it+1 == optim_options["max_iterations"]:
+        print("Reached maximum number of iterations (before reaching convergence threshold).")
 
     return PSR, evol
 
@@ -208,7 +243,8 @@ if __name__ == '__main__':
         xB, xA = xA, xB
 
     # Model parameters
-    model_parameters = {"sigma_data": 0.1,
+    model_parameters = {"type": "similarity",
+                        "sigma_data": 0.1,
                         "noise_std": 0.2,
                         "sigma_LDDMM": 0.2
                         }

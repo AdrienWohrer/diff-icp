@@ -15,7 +15,7 @@ import torch
 #pykeops.clean_pykeops()
 
 # Manual random generator seeds (to always reproduce the same point sets if required)
-torch.random.manual_seed(1234)
+# torch.random.manual_seed(1234)
 
 ###################################################################
 # Import from diffICP module
@@ -76,7 +76,7 @@ plt.pause(.2)
 ### GMM model
 
 C = 20
-GMMi = GaussianMixtureUnif(torch.zeros(C,2))    # initial value for mu = whatever (will be changed by PSR algo)
+GMMi = GaussianMixtureUnif(torch.zeros(C,2))    # initial value for mu = whatever (will be changed by PSR.reinitialize_GMM)
 GMMi.to_optimize = {
     "mu" : True,
     "sigma" : True,
@@ -93,14 +93,16 @@ LMi = LDDMMModel(sigma = 0.2,                           # sigma of the Gaussian 
                           scheme="Euler")               # "Euler" or "Ralston"
 
 PSR = DiffPSR(x0, GMMi, LMi)
+PSR.reinitialize_GMM()
+
 # Change support scheme ?
 PSR.set_support_scheme("grid", rho=np.sqrt(2))
 # PSR.set_support_scheme("decim", rho=0.7)
 
 ### Point Set Registration model : affine version
 
-# PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'rigid'))
-# PSR = affinePSR(x0, GMMi, AffineModel(D=2, version = 'general_affine'))
+# PSR = AffinePSR(x0, GMMi, AffineModel(D=2, version = 'rigid'))
+# PSR = AffinePSR(x0, GMMi, AffineModel(D=2, version = 'general_affine'))
 
 # for storing results
 a0_evol = []

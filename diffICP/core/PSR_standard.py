@@ -7,6 +7,8 @@ Basically this is a reimplementation of the point set registration algorithm pre
 import warnings
 
 import numpy as np
+import scipy
+
 from matplotlib import pyplot as plt
 plt.ion()
 
@@ -147,6 +149,9 @@ class MultiPSR_std:
         # self.Ny[s] = number of points in template point set y[s]
         self.Ny = np.array([self.y0[s].shape[0] for s in range(self.S)])
 
+        # All y0 points (across all structures s)
+        self.ally0 = torch.cat(tuple(self.y0), dim=0).clone().to(**self.compspec).detach().contiguous()      # safer to clone ?
+
         ### EXPERIMENTAL ! Associate each point in y0 to a different WEIGHT. (Viewing y0 as a distribution)
         self.template_weights = template_weights
         if self.template_weights:
@@ -160,7 +165,7 @@ class MultiPSR_std:
         # The FULL optimization energy writes
         #   E = \sum_{k,s} dataloss[k,s] + \sum_k regloss[k]
 
-        self.regloss = [0] * self.K                         # updated after Reg_opt
+        self.regloss = [0] * self.K                         # updated after Reg_opt (only in the diffeomorphic case)
         self.dataloss = np.zeros((self.K,self.S))           # updated both after GMM_opt and Reg_opt
         # Compute energy values at initialization
         for k in range(self.K):
@@ -265,6 +270,7 @@ class MultiPSR_std:
         :param s: some s index, or None (-> loop over all s=1...S)
         :param caller: function calling update_state() : self.Template_opt, self.Reg_opt, or None (some other caller)
         '''
+
         if k is None:
             klist = range(self.K)
         else:
@@ -277,7 +283,7 @@ class MultiPSR_std:
         ### Recompute warped templates and dataloss
         for k in klist:
             for s in slist:
-                if isinstance(self, DiffPSR_std) and caller != self.Reg_opt :   # (self.Reg_opt already does it)
+                if caller != self.Reg_opt :   # (self.Reg_opt already does it)
                     self.y1[k,s] = self.Registration(k).apply(self.y0[s]).detach()
                 self.dataloss[k,s] = data_distance(self.DataKernel, self.x[k,s], self.y1[k,s], self.w0[s]) / self.noise_std[s]**2
 
@@ -287,15 +293,16 @@ class MultiPSR_std:
                 self.regloss[k] = self.LMi.trajloss(self.Registration(k).shoot(None))
 
         ### If caller=Template_opt : update ally0, LDDMM support points q0, and momenta a0
-        if isinstance(self, DiffPSR_std) and caller == self.Template_opt :
+        if caller == self.Template_opt :
             self.ally0 = torch.cat(tuple(self.y0), dim=0).clone().to(**self.compspec).detach().contiguous()  # safer to clone ?
-            q0_prev = self.q0                           # previous support points
-            if self.support_scheme is None:
-                self.q0 = self.ally0                    # new  support points
-                self.update_a0(q0_prev, rcond=1e-1)     # Update a0 to reflect the change in support points
-            elif self.support_scheme=='decim':
-                # Recompute support points with a new decimation ! TODO Warning : not tested at all
-                self.set_support_scheme("decim", self.rho)
+            if isinstance(self, DiffPSR_std) :
+                q0_prev = self.q0                           # previous support points
+                if self.support_scheme is None:
+                    self.q0 = self.ally0                    # new  support points
+                    self.update_a0(q0_prev, rcond=1e-1)     # Update a0 to reflect the change in support points
+                elif self.support_scheme=='decim':
+                    # Recompute support points with a new decimation ! TODO Warning : not tested at all
+                    self.set_support_scheme("decim", self.rho)
 
         ### Recompute and store current value of optimization energy
         E = sum(self.regloss) + self.dataloss.sum().item()
@@ -346,7 +353,7 @@ class MultiPSR_std:
 
 #######################################################################
 ###
-### Derived class DiffPSR_std : multiPSR_std with diffeomorphic (LDDMM) registrations
+### Derived class DiffPSR_std : MultiPSR_std with diffeomorphic (LDDMM) registrations
 ###
 #######################################################################
 
@@ -394,9 +401,6 @@ class DiffPSR_std(MultiPSR_std):
         if LMi.Kernel.spec != compspec:
             raise ValueError("Spec (dtype+device) error : LDDMMmodel 'spec' and diffPSR 'compspec' attributes should be the same")
         self.LMi = LMi
-
-        # All y0 points (across all structures s)
-        self.ally0 = torch.cat(tuple(self.y0), dim=0).clone().to(**self.compspec).detach().contiguous()      # safer to clone ?
 
         # Initial LDDMM support points q0 : by defaut, all points y0
         # NOTA : This behavior can be overridden by using function self.set_support_scheme() (TODO write!)
@@ -561,12 +565,9 @@ class DiffPSR_std(MultiPSR_std):
 ###
 #######################################################################
 
-# TODO !!!!
-
-
 class AffinePSR_std(MultiPSR_std):
     '''
-    multiPSR_std algorithm with affine (viz. euclidian, rigid) registrations. That is,
+    MultiPSR_std algorithm with affine (viz. euclidian, rigid) registrations. That is,
         T(X) = X * M' + t'      with
 
         X(N,d): input data points ;
@@ -574,25 +575,32 @@ class AffinePSR_std(MultiPSR_std):
         M(d,d): linear deformation matrix ;
     '''
 
-    def __init__(self, x, GMMi: GaussianMixtureUnif, AffMi: AffineModel, dataspec=defspec, compspec=defspec):
-
-        raise NotImplementedError("Affine version of 'standard' PSR algorithm not implemented yet")
-
+    def __init__(self, x, y_template, noise_std, AffMi:AffineModel, DataKernel:GenKernel, template_weights=False, dataspec=defspec, compspec=defspec):
         '''
-        :param x: list of input point sets. Three possible formats:
+        :param x: list of data point sets (fixed). Three possible formats:
             x = torch tensor of size (N, D) : single point set;
             x[k] = torch tensor of size (N[k], D) : point set from frame k;
             x[k][s] = torch tensor of size (N[k,s], D) : point set in structure s from frame k;
 
-        :param GMMi: GMM model (and parameters) used in the algorithm. Two possible formats:
-            GMMi = single GMM model (for a single structure);
-            GMMi[s] = GMM model for structure s;
-            In any case, the GMMs given as input will be *copied* in the multiPSR object;
+        :param y_template: template point set (the one that will be deformed). Two possible formats:
+            y_template = single point set (for a single structure);
+            y_template[s] = point set for structure s (for multiple structures);
+            In any case, the point sets given as input will be *copied* in the multiPSR_std object;
+
+        :param noise_std: reference value for dataloss, for each structure s:
+            noise_std = single reference value (for a single structure);
+            noise_std[s] = reference value for structure s (for multiple structures);
+            The smaller noise_std, the more exact is required the match between point sets (at the cost of more deformation).
+            Globally, noise_std plays the same role as sqrt(lambda) [LDDMM regularization constant] in my own framework;
 
         :param AffMi: Affine model (and parameters) used in the algorithm, as provided in class AffineModel.
-            In particular, version = 'euclidian' (rotation+translation), 'rigid' (euclidian+scaling), 'linear' (unconstrained affine).
+            In particular, version = 'rigid' (rotation+translation), 'similarity' (euclidian+scaling), 'general_affine' (unconstrained affine).
 
-        :param dataspec: spec (dtype+device) under which all point sets are stored (see diffICP/spec.py)
+        :param DataKernel: RKHS Kernel for the Data points (dedicated class);
+
+        :param template_weights: set at True to associate each template point to a different scalar weight;
+
+        :param dataspec: spec (dtype+device) under which all point sets are stored (see diffICP/spec.py);
 
         :param compspec: spec (dtype+device) under which the actual computations (GMM and registrations) will be performed.
             These two concepts are kept separate in case one wishes to use Gpu for the computations (use compspec["device"]='cuda:0')
@@ -600,48 +608,73 @@ class AffinePSR_std(MultiPSR_std):
             Of course, ideally, everything should be kept on the same device to avoid copies between devices.
         '''
 
-        # Initialize common features of the algorithm (class multiPSR)
-        super().__init__(x, GMMi, dataspec=dataspec, compspec=compspec)
+        # Initialize common features of the algorithm (class MultiPSR_std)
+        super().__init__(x, y_template, noise_std, DataKernel=DataKernel, template_weights=template_weights, dataspec=dataspec, compspec=compspec)
+
         self.AffMi = AffMi
         # Affine transform applied to each frame k  (T(x) = M*x+t)
         self.M = [torch.eye(self.D, **dataspec)] * self.K
-        self.t = [torch.zeros(self.D, **dataspec)] * self.K
-
+        # self.t = [torch.zeros(self.D, **dataspec)] * self.K
+        self.t = [torch.concatenate(tuple(self.x[k,:]),dim=0).mean(dim=0) - self.ally0.mean(dim=0) for k in range(self.K)]
 
     ################################################################
     ################################################################
 
-    def Reg_opt(self, tol=1e-5):
+    def Reg_opt(self, nmax=10, tol=1e-5):
         '''
         Affine registration optimization function.
         :param tol : relative tolerance for stopping (before nmax).
         '''
 
+        # The optimization problem to be solved :
+        #       min_{M,t} data_distance(x, y*M'+t')
+        # has no analytical solution (because of the non-linear form K(.,y*M'+t')).
+        # Hence, we must resort to numerical resolution, just like in the diffeomorphic case
+
         for k in range(self.K):
             ### Find best-fitting linear transform for frame k
 
-            X = torch.cat(tuple(self.x0[k,:]), dim=0).to(**self.compspec)   # (N,D)
-            Y = torch.cat(tuple(self.y[k,:]), dim=0).to(**self.compspec)    # (N,D). Must fit Y = X*M' + t'
-            z = torch.cat(tuple( 1/(2*self.GMMi[s].sigma**2) * torch.ones(self.N[k,s]) for s in range(self.S) )
-                          ).to(**self.compspec)  # ugly because depends on s
+            def lossfunc(M, t):
+                L = torch.Tensor([0.0])
+                for s in range(self.S):
+                    L += data_distance(self.DataKernel, self.x[k,s], self.y0[s] @ M.t() + t[None,:], self.w0[s])
+                return L
 
-            self.M[k], self.t[k], TX, datal, self.regloss[k] = self.AffMi.Optimize(X,Y,z)
+            if self.AffMi.version == "general_affine":
+                p, L, nsteps, change = LBFGS_optimization([self.M[k],self.t[k]], lossfunc, nmax=nmax, tol=tol)
+                self.M[k], self.t[k] = p
 
-            ### Update self.x1
-            last = 0
+            elif self.AffMi.version == "rigid":
+                LM = scipy.linalg.logm(self.M[k].numpy())           # log of M
+                LM = torch.Tensor((LM - LM.T).real/2)     # ensure skew-symmetricity
+                p, L, nsteps, change = LBFGS_optimization([LM,self.t[k]],
+                                                          lambda A,t: lossfunc(torch.linalg.matrix_exp((A-A.T)/2), t), nmax=nmax, tol=tol)
+                LM, self.t[k] = p
+                self.M[k] = torch.linalg.matrix_exp((LM-LM.T)/2)
+
+            elif self.AffMi.version == "similarity":
+                LM = scipy.linalg.logm(self.M[k].numpy())           # log of M
+                LM = torch.Tensor((LM - LM.T).real/2)     # ensure skew-symmetricity
+                p, L, nsteps, change = LBFGS_optimization([LM, torch.Tensor([1]), self.t[k]],
+                                                          lambda A,s,t: lossfunc(s* torch.linalg.matrix_exp((A-A.T)/2), t), nmax=nmax, tol=tol)
+                LM, sc, self.t[k] = p
+                self.M[k] = sc * torch.linalg.matrix_exp((LM-LM.T)/2)
+
+            else:
+                raise NotImplementedError(f"AffinePSR_std.Reg_opt : unimplemented affine version : {self.AffMi.version}.")
+
+            # Update self.y1
             for s in range(self.S):
-                first, last = last, last + self.N[k,s]
-                self.x1[k,s] = TX[first:last].to(**self.dataspec)
+                self.y1[k,s] = self.y0[s] @ self.M[k].t() + self.t[k][None,:]
 
-            ### update quadratic losses (between x1 and targets y)
-            for s in range(self.S):
-                self.update_quadloss(k,s)
+            # Update variables and print energy (to check that it only decreases!)
+            self.update_state(k=k, caller=self.Reg_opt)
 
-            # print("Affine reg check : ", datal, " = ", self.quadloss[k,:].sum().item())  # small_tests that quadlosses are well computed and compatible
+            # self.update_energy(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change ={change:.4}.")
+            print(f"Frame {k} : {nsteps} optim steps, loss={L:.4}, change={change:.4}.".ljust(70)
+                  + f"Total energy = {self.E:.8}")
 
             # Compute a representative "shooting", as in the LDDMM case, mainly for plotting purposes.
-            self.shoot[k] = self.AffMi.Shoot(self.M[k], self.t[k], X)
+            self.shoot[k] = self.AffMi.Shoot(self.M[k], self.t[k], self.ally0)
 
-            ### Report for this frame, print full free energy (to check that it only decreases!)
-            self.update_FE(message = f"Frame {k} : loss={self.regloss[k] + datal:.4}.")
 
