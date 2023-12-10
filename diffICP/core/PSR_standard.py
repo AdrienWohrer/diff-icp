@@ -103,6 +103,9 @@ class MultiPSR_std:
         self.dataspec, self.compspec = dataspec, compspec
         self.DataKernel = DataKernel
 
+        # Verbose mode ?
+        self.printstuff = True
+
         ### Read input point sets and various dimensions.
         #   x: point sets, now cast in the format x[k][s] ;
         #   self.K = number of frames
@@ -247,7 +250,8 @@ class MultiPSR_std:
             # Update variables
             self.update_state(s=s, caller=self.Template_opt)
             # Print energy (to check that it only decreases)
-            print(f"Template {s} : {nsteps} optim steps, loss={L:.4}, change={change:.4}.".ljust(70)
+            if self.printstuff:
+                print(f"Template {s} : {nsteps} optim steps, loss={L:.4}, change={change:.4}.".ljust(70)
                   + f"Total energy = {self.E:.8}")
 
     ################################################################
@@ -471,7 +475,8 @@ class DiffPSR_std(MultiPSR_std):
             # Report amount of decimation (across all structures s)
             Ndecim = sum([len(supp_ids[s]) for s in range(self.S)])
             Pdecim = Ndecim / sum(self.Ny)
-            print(f"Decimation : {Ndecim} support points ({Pdecim:.0%} of original sets)")
+            if self.printstuff:
+                print(f"Decimation : {Ndecim} support points ({Pdecim:.0%} of original sets)")
             # And thus
             self.q0 = torch.cat(tuple(self.y0[s][supp_ids[s]] for s in range(self.S)), dim=0).to(**self.compspec).contiguous()
 
@@ -522,14 +527,14 @@ class DiffPSR_std(MultiPSR_std):
             if self.support_scheme is None:
                 # (default) dense scheme : support_points q = template points y
                 self.a0[k], self.shoot[k], self.regloss[k], datal, isteps, change = \
-                    self.LMi.Optimize(lambda q,y: dataloss_func(q), self.q0, self.a0[k], tol=tol, nmax=nmax)
+                    self.LMi.Optimize(dataloss_func, self.q0, self.a0[k], tol=tol, nmax=nmax)
                 # Recover warped template points
                 ally1k = self.shoot[k][-1][0]
 
             else:
                 # other support scheme : support_points q != template points y
                 self.a0[k], self.shoot[k], self.regloss[k], datal, isteps, change = \
-                    self.LMi.Optimize(lambda q,y: dataloss_func(y), self.q0, self.a0[k], self.ally0, tol=tol, nmax=nmax)
+                    self.LMi.Optimize(dataloss_func, self.q0, self.a0[k], self.ally0, tol=tol, nmax=nmax)
                 # Recover warped template points
                 ally1k = self.shoot[k][-1][-1]
 
@@ -671,8 +676,9 @@ class AffinePSR_std(MultiPSR_std):
             self.update_state(k=k, caller=self.Reg_opt)
 
             # self.update_energy(message = f"Frame {k} : {isteps} optim steps, loss={self.regloss[k] + datal:.4}, change ={change:.4}.")
-            print(f"Frame {k} : {nsteps} optim steps, loss={L:.4}, change={change:.4}.".ljust(70)
-                  + f"Total energy = {self.E:.8}")
+            if self.printstuff:
+                print(f"Frame {k} : {nsteps} optim steps, loss={L:.4}, change={change:.4}.".ljust(70)
+                      + f"Total energy = {self.E:.8}")
 
             # Compute a representative "shooting", as in the LDDMM case, mainly for plotting purposes.
             self.shoot[k] = self.AffMi.Shoot(self.M[k], self.t[k], self.ally0)

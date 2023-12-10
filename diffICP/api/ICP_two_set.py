@@ -88,8 +88,9 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
 
     :param registration_parameters: dict with main model parameters for the registration part :
         registration_parameters["type"] : "rigid" or "similarity" or "general_affine" or "diffeomorphic" ;
-        registration_parameters["lambda_LDDMM"]: regularization term of the LDDMM framework (only used if diffeomorphic). "auto" for ad hoc calibration ;
-        registration_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
+        registration_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel for LDDMM (only used if diffeomorphic) ;
+        registration_parameters["lambda_LDDMM"]: regularization term of the LDDMM framework (only used if diffeomorphic).
+            Set at "auto" for ad hoc calibration (experimental!) ;
 
     :param numerical_options: dict with various numerical details of the algorithm :
         numerical_options["computversion"] : "keops" or "torch" ;

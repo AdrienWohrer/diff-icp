@@ -70,7 +70,8 @@ def standard_two_set(xA, xB, model_parameters: dict,
     :param model_parameters: dict with main model parameters :
         model_parameters["type"] : "rigid" or "similarity" or "general_affine" or "diffeomorphic" ;
         model_parameters["sigma_data"]: spatial std of the RKHS Kernel used to define the data distance, (K(x)=exp(-x^2/2*sigma^2)) ;
-        model_parameters["noise_std"]: scaling parameter of the data loss term, so Loss = \sum_s rkhs_distance(s) / noise_std[s]^2 ;
+        model_parameters["noise_std"]: scaling parameter of the data loss term, so Loss = \sum_s rkhs_distance(s) / noise_std[s]^2 .
+            Set at "auto" for ad hoc calibration (experimental!) ;
         model_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms (only used when type='diffeomorphic') ;
 
     :param numerical_options: dict with various numerical details of the algorithm :
@@ -174,6 +175,8 @@ def standard_two_set(xA, xB, model_parameters: dict,
 
     ########################
 
+    PSR.printstuff = printstuff
+
     if plotstuff:
         plt.figure()    # Figure 1 : basic point sets
         plot_state(PSR, bounds, plot_gridlines=False)
@@ -254,7 +257,7 @@ if __name__ == '__main__':
     # Optimization options
     optim_options = {'max_iterations': 15,              # Number of global loop iterations (fixed, for the moment)
                      'convergence_tolerance': 1e-7,     # for each optimization in the global loop (for the moment)
-                     'nmax_per_iter': 2
+                     'nmax_per_iter': 20
                      }
 
     PSR, evol = \

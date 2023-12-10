@@ -4,11 +4,13 @@ Implement ad hoc "calibration" procedures for the tradeoff parameter of the algo
     - diffICP algorithm : parameter lambda_LDDMM
 '''
 
+import math
 import torch
 
 from diffICP.core.GMM import GaussianMixtureUnif
 from diffICP.core.LDDMM import LDDMMModel
 from diffICP.core.affine import AffineModel
+from diffICP.core.PSR_standard import data_distance
 from diffICP.tools.point_sets import intrinsic_scale
 
 # "import xxxx" avoids circular imports
@@ -81,13 +83,11 @@ def calibrate_lambda_LDDMM(x: torch.Tensor, x2: torch.Tensor, sigma_LDDMM):
 def calibrate_noise_std(x: torch.Tensor, x2: torch.Tensor, sigma_LDDMM):
     '''
     Calibrate noise_std for "standard' diffeomorphic registration of point set x on point set x2
-    :param x:
-    :param x2:
+    :param x: "template" point set that will be deformed
+    :param x2: "data" point set that will be fixed
     :param sigma_LDDMM:
     :return: predicted noise_std value
     '''
-
-    raise NotImplementedError("NOT IMPLEMENTED YET!")
 
     ### AFFINE REGISTRATION of x on x2
 
@@ -111,18 +111,20 @@ def calibrate_noise_std(x: torch.Tensor, x2: torch.Tensor, sigma_LDDMM):
 
     # (default) dense scheme : support_points q = data_points x. TODO: allow to define a support scheme if dense version is too slow ?
 
-    a0 = LM.v2p(x, y - x, rcond=1e-2)   # initialize at 'target' speeds
+    Tx = PSR.Registration().apply(x)
+    a0 = LM.v2p(x, Tx - x, rcond=1e-2)   # initialize at 'target' speeds
     H0_ref = LM.Hamiltonian(x,a0)       # reference value for the regularization term
 
-    def expLossFunc(q,x):
-        L = ((q - y) ** 2).sum() / (2 * sigref**2)
+    def expLossFunc(q):
+        L = data_distance(PSR.DataKernel, q, x2)
         return H0_ref * (L/Lref).exp()
 
-    a0, shoot, regloss, _, _, _ = LM.Optimize(expLossFunc, x, a0, tol=1e-3, nmax=20)
+    a0, _, _, _, _, _ = LM.Optimize(expLossFunc, x, a0, tol=1e-3, nmax=20)
+    regloss = LM.Hamiltonian(x,a0)
 
-    # 'Optimal' lambda_LDDMM should lead to an approximate 1-1 balance of dataloss and regularity in the atlas building, i.e.
-    #       typical_quadloss ~= lambda_LDDMM * typical_LDDMM_deformation
+    # 'Optimal' noise_std should lead to an approximate 1-1 balance of dataloss and regularity in the atlas building, i.e.
+    #       typical_quadloss / noise_std**2 ~= typical_LDDMM_deformation
     # Thus, we predict:
 
-    lambda_LDDMM = Lref / regloss
-    return lambda_LDDMM
+    noise_std = math.sqrt(Lref / regloss)
+    return noise_std

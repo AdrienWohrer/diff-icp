@@ -25,7 +25,7 @@ from diffICP.tools.point_sets import intrinsic_scale
 from diffICP.visualization.visu import my_scatter
 
 from diffICP.core.PSR_standard import DiffPSR_std
-
+import diffICP.core.calibration as calibration
 
 ##################################################################################
 ### Debug function : plot the current state of PSR model (template location, target points, trajectories etc.)
@@ -60,7 +60,7 @@ def plot_state(PSR:DiffPSR_std, sigma=None, only_template=False):
 
 def standard_atlas(x, initial_template=0,
                        model_parameters={},
-                       numerical_options={}, optim_options={}, callback_function=None):
+                       numerical_options={}, optim_options={}, callback_function=None, printstuff=True):
     '''
     Launch standard LDDMM atlas building, using personal reimplementation in PSR_standard.py.
 
@@ -73,7 +73,8 @@ def standard_atlas(x, initial_template=0,
     :param model_parameters: dict with main model parameters :
         model_parameters["sigma_data"]: spatial std of the RKHS Kernel used to define the data distance, (K(x)=exp(-x^2/2*sigma^2)).
             If None, automatically use a reference value based on the 'intrinsic scale' of the point sets ;
-        model_parameters["noise_std"]: scaling parameter of the data loss term, so Loss = \sum_s rkhs_distance(s) / noise_std[s]^2 ;
+        model_parameters["noise_std"]: scaling parameter of the data loss term, so Loss = \sum_s rkhs_distance(s) / noise_std[s]^2.
+            Set at "auto" for ad hoc calibration (experimental!) ;
         model_parameters["sigma_LDDMM"]: spatial std of the RKHS Kernel defining LDDMM diffeomorphisms ;
         model_parameters["use_template_weights"]: associate inhomogeneous scalar weights to the template points, and optimize them too ;
 
@@ -86,6 +87,8 @@ def standard_atlas(x, initial_template=0,
 
     :param callback_function: optional function to execute at every iteration of the optimization loop, e.g. for reporting or plotting.
         Must take the form callback_function(PSR, before_reg=False/True), with PSR the PSR object being currently optimized
+
+    :param printstuff: True/False, whether to print evolution information during optimization ;
 
     :return: PSR [main output, registration object after optim], evol [evolution of selected quantities over iterations]
     '''
@@ -149,7 +152,24 @@ def standard_atlas(x, initial_template=0,
 
     DataKernel = GaussKernel(model_parameters["sigma_data"], D=D, spec=compspec)
 
-    LMi = LDDMMModel(sigma=model_parameters["sigma_LDDMM"],         # sigma of the Gaussian kernel
+    noise_std = model_parameters["noise_std"]
+    sig = model_parameters["sigma_LDDMM"]
+
+    # Special code for automatic calibration of noise_std (EXPERIMENTAL!)
+    if noise_std == "auto":
+        if printstuff:
+            print("--------------------\nAutomatic calibration of noise_std (warning: this is ad hoc!) ...")
+        # Calibrate lambda from repeated two_set registrations of one (arbitrary) point set on another
+        N_pairs = min(K - 1, 10)
+        noise_stds = torch.tensor(
+            [calibration.calibrate_noise_std(x[i][0], x[i + 1][0], sig) for i in range(N_pairs)])
+        noise_stds = noise_stds[torch.logical_not(noise_stds.isnan())]
+        # Harmonic mean seems more appropriate given that noise_std is an "inverse deformation".
+        noise_std = 1 / ((1 / noise_stds).mean())
+        if printstuff:
+            print(f"    noise_std = {noise_std}\n--------------------")
+
+    LMi = LDDMMModel(sigma=sig,                 # sigma of the Gaussian kernel
                      D=D,                       # dimension of space
                      lambd=2.0,                 # Always 2 to match the "standard" definition in deformetrica.
                      version="classic",
@@ -158,7 +178,7 @@ def standard_atlas(x, initial_template=0,
                      spec= compspec,                                        # device and type of data
                      nt=numerical_options["integration_nt_LDDMM"])
 
-    PSR = DiffPSR_std(x, initial_template, model_parameters["noise_std"], LMi, DataKernel,
+    PSR = DiffPSR_std(x, initial_template, noise_std, LMi, DataKernel,
                       compspec=compspec, dataspec=dataspec,
                       template_weights=model_parameters["use_template_weights"])
 
