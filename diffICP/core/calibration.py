@@ -49,9 +49,12 @@ def calibrate_lambda_LDDMM(x: torch.Tensor, x2: torch.Tensor, sigma_LDDMM):
 
     ### LAUNCH AD HOC LDDMM OPTIMIZATION :
     #       min_{a0}  K * exp( quadloss(a0)/Lref ) + 0.5 * ||a0||_{rkhs}^2
-    # which represents a smoothed version of the following constrained optimization :
+    # which represents a relaxed version of the following constrained optimization :
     #       min_{a0}  ||a0||_{rkhs}^2    subject to quadloss(a0) <= Lref
     # For constant K, use a "reference" value of ||a0||_{rkhs}^2, before optimization
+
+    # TODO: this is very unstable, as exp(quadloss(a0)/Lref) is very prone to numeric overflow
+    # TODO: must find another procedure, more stable, to realize the "relaxed constrained optimization" required
 
     LM = LDDMMModel(sigma=sigma_LDDMM, D=x.shape[1], lambd=1, version="classic",
                     computversion="keops", scheme="Ralston")

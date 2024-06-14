@@ -8,6 +8,8 @@ Results should be compared to our own method diffICP atlas construction.
 
 Nota : running this file as a script provides an example usage of the function.
 Else, simply import function deformetrica_atlas in other scripts to use it there.
+
+TODO WARNING : 'TkAgg' problem, seems to be automatically modified by deformetrica (see circa line 260)
 '''
 
 import copy
@@ -223,6 +225,14 @@ def deformetrica_atlas(x, initial_template:torch.Tensor, model_parameters,
     return PSR, iter_status, shoot_defo
 
 
+################################################################################
+################################################################################
+### Testing
+################################################################################
+################################################################################
+
+if __name__ == '__main__':
+    # Running as a script
 
     import os
     from diffICP.examples.generate_spiral_point_sets import generate_spiral_point_sets
@@ -259,7 +269,8 @@ def deformetrica_atlas(x, initial_template:torch.Tensor, model_parameters,
                            estimator_options=estimator_options)
 
     import matplotlib
-    matplotlib.use('TkAgg')
+    if os.environ.get("DISPLAY"):   # to avoid error on hpc2 (TODO DEBUG)
+        matplotlib.use('TkAgg')     # apparently this is automatically modified by Deformetrica ! (TODO DEBUG)
 
     def plot_with_template(template):
         plt.figure()

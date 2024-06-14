@@ -29,7 +29,6 @@ import diffICP.core.calibration as calibration
 ##################################################################################
 ### 2d debug function : plot the current state of PSR model (GMM location, target points, trajectories etc.)
 
-matplotlib.use('TkAgg')
 def plot_state(PSR:MultiPSR, only_GMM=False):
     plt.clf()
 
@@ -60,7 +59,8 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
         GMM_parameters["init_components"] : starting point for the fitted GMM models. Can be
             - an integer N : ad hoc initialization of a GMM model with N components (for each structure)
             - a tuple ("set",i) : use point set x[i] as initial centroids (thus also fixing the number of components)
-            - a full preexisting GMM model (whose options can then be modified by optimize_weights, fixed_sigma, etc.) ;
+            - a dict {"set":i, "C":N} : fit a GMM with N components to point set x[i], and use the result as initial GMM model
+            - a full preexisting list of GMMs (one for each structure) whose options can then be modified by optimize_weights, fixed_sigma, etc. ;
         GMM_parameters["optimize_weights"] : True [default] / False, whether to optimize GMM component weights ;
         GMM_parameters["fixed_sigma"] : None [optimize sigma] or fixed positive value for sigma [and do not optimize] ;
         GMM_parameters["outlier_weight"] : None [no outlier component] or "optimize" [optimize weight] or float value [fixed log-odds ratio] ;
@@ -93,9 +93,11 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
     # Check mandatory model parameters (GMM and registration)
 
     init = GMM_parameters.get("init_components")
+
     assert type(init) is int or \
            type(init) is tuple and init[0] == "set" or \
-           isinstance(init, GaussianMixtureUnif), \
+           type(init) is dict and set(init.keys()) == {'set', 'C'} or \
+           type(init) is list and all(isinstance(g, GaussianMixtureUnif) for g in init), \
             "Wrong format for parameter GMM_parameters['init_components']. See docstring for ICP_atlas."
 
     assert GMM_parameters.get("outlier_weight") is None or \
@@ -171,7 +173,7 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
     if type(init) is int:
         C = init    # required number of GMM components
         # initial value for mu = whatever (will be changed by PSR.reinitialize_GMM)
-        GMMi = GaussianMixtureUnif(torch.zeros(C,D), use_outliers=use_outliers, spec=compspec)
+        GMMi = [GaussianMixtureUnif(torch.zeros(C,D), use_outliers=use_outliers, spec=compspec) for s in range(S)]
         reinit_mu, reinit_sigma = True, opt_sigma
 
     elif type(init) is tuple:
@@ -179,13 +181,14 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
         GMMi = [GaussianMixtureUnif(x0[k][s], use_outliers=use_outliers, spec=compspec) for s in range(S)]
         reinit_mu, reinit_sigma = False, opt_sigma
 
-    elif isinstance(init, GaussianMixtureUnif):
-        GMMi = copy.deepcopy(GMM_parameters["initial_GMM"])                         # (Nota: could lead to spec clashes in some weird cases)
+    elif type(init) is dict:
+        k, C = init["set"], init["C"]
+        GMMi = [GaussianMixtureUnif.get_GMM_model(x0[k][s].to(**compspec), C, fixed_sigma=None, optimize_w=False, use_outliers=use_outliers, spec=compspec) for s in range(S)]
         reinit_mu, reinit_sigma = False, False
 
-    # ensure list format (one GMM per structure)
-    if isinstance(GMMi, GaussianMixtureUnif):
-        GMMi = [GMMi] * S
+    elif type(init) is list:
+        GMMi = [copy.deepcopy(g) for g in init]            # (Nota: could lead to spec clashes in some weird cases)
+        reinit_mu, reinit_sigma = False, False
 
     # modify required GMM optimization parameters
     for GMM in GMMi:
@@ -209,7 +212,7 @@ def ICP_atlas(x0, GMM_parameters={}, registration_parameters={},
         # Special code for automatic calibration of lambda_LDDMM (EXPERIMENTAL!)
         if lam == "auto":
             if printstuff:
-                print("--------------------\nAutomatic calibration of lambda_LDDMM (warning: this is ad hoc!) ...")
+                print("--------------------\nAutomatic calibration of lambda_LDDMM\nWARNING: this is ad hoc and, for the moment, unstable! If NaN or NoneType appear, give it up.\n...")
             # Calibrate lambda from repeated two_set registrations of one (arbitrary) point set on another
             N_pairs = min(K-1, 10)
             lambdas = torch.tensor([ calibration.calibrate_lambda_LDDMM(x0[i][0], x0[i+1][0], sig) for i in range(N_pairs) ])
@@ -328,7 +331,7 @@ if __name__ == '__main__':
                                               sigma_GMM=0.025,
                                               sigma_LDDMM=0.1, lambda_LDDMM=1e2)
 
-    GMM_parameters = {"init_components": ("set",0), # 20,
+    GMM_parameters = {"init_components": {'set': 0, 'C': 20}, # 20, # ("set",0), # {'set': 0, 'N': 20}
                       "optimize_weights": True,
                       "outlier_weight": None}
 

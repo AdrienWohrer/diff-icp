@@ -43,7 +43,7 @@ class MultiPSR:
 
     ###################################################################
 
-    def __init__(self, x, GMMi: GaussianMixtureUnif, dataspec=defspec, compspec=defspec):
+    def __init__(self, x, GMMi, dataspec=defspec, compspec=defspec):
         '''
         :param x: list of input point sets. Three possible formats:
             x = torch tensor of size (N, D) : single point set;
@@ -162,7 +162,7 @@ class MultiPSR:
                 # initial centroids = close to center of mass of all (unwarped) points
                 self.GMMi[s].mu = allx0s.mean(dim=0) + 0.05 * allx0s.std() * torch.randn(self.GMMi[s].C, self.D, **self.dataspec)
             if do_sigma and self.GMMi[s].to_optimize["sigma"]:
-                self.GMMi[s].sigma = 0.25 * allx0s.std()  # ad hoc
+                self.GMMi[s].sigma = 0.25 * allx0s.std().item()  # ad hoc
 
         self.update_GMM_targets()                               # update self.y, self.Cfe, self.quadloss and self.FE accordingly
 
@@ -356,7 +356,7 @@ class DiffPSR(MultiPSR):
     MultiPSR algorithm with diffeomorphic (LDDMM) registrations.
     '''
 
-    def __init__(self, x, GMMi: GaussianMixtureUnif, LMi: LDDMMModel, dataspec=defspec, compspec=defspec):
+    def __init__(self, x, GMMi, LMi: LDDMMModel, dataspec=defspec, compspec=defspec):
         '''
         :param x: list of input point sets. Three possible formats:
             x = torch tensor of size (N, D) : single point set;
@@ -464,7 +464,7 @@ class DiffPSR(MultiPSR):
                 # Report amount of decimation for each frame k (across all structures s)
                 Ndecim = sum([len(supp_ids[k,s]) for s in range(self.S)])
                 Pdecim = Ndecim / sum([self.N[k,s] for s in range(self.S)])
-                if self.prinstuff:
+                if self.printstuff:
                     print(f"Decimation, frame {k} : {Ndecim} support points ({Pdecim:.0%} of original sets)")
                 # And thus
                 self.q0[k] = torch.cat(tuple(self.x0[k,s][supp_ids[k,s]] for s in range(self.S)), dim=0).to(**self.compspec).contiguous()
@@ -585,7 +585,7 @@ class AffinePSR(MultiPSR):
         M(d,d): linear deformation matrix ;
     '''
 
-    def __init__(self, x, GMMi: GaussianMixtureUnif, AffMi: AffineModel, dataspec=defspec, compspec=defspec):
+    def __init__(self, x, GMMi, AffMi: AffineModel, dataspec=defspec, compspec=defspec):
         '''
         :param x: list of input point sets. Three possible formats:
             x = torch tensor of size (N, D) : single point set;

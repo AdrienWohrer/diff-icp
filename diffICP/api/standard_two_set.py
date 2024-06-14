@@ -7,7 +7,7 @@ Nota : running this file as a script provides an example usage of the function.
 Else, simply import function standard_atlas in other scripts to use it there.
 '''
 
-import math, copy
+import math, copy, os
 import pickle
 
 import numpy as np
@@ -29,8 +29,6 @@ from diffICP.core.PSR_standard import MultiPSR_std, DiffPSR_std, AffinePSR_std
 
 ##################################################################################
 ### Default visualization function : plot the current state of PSR model (template location, target points, trajectories etc.)
-
-matplotlib.use('TkAgg')
 
 def plot_state(PSR: MultiPSR_std, bounds, plot_gridlines=True):
 

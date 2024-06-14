@@ -19,6 +19,7 @@ def intrinsic_scale(x):
 
     # TODO any cleaner way of doing this ?
 
+    x = x.contiguous()
     D_ij = ((LazyTensor(x[:,None,:]) - LazyTensor(x[None,:,:])) ** 2).sum(-1)
     min_D_i = D_ij.Kmin(2, dim=1)[:,1] # (=second smallest ; the smallest is always 0, i.e., each point with itself)
     sigma_X = min_D_i.mean().sqrt()

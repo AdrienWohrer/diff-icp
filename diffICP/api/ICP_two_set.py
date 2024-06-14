@@ -31,11 +31,8 @@ from diffICP.tools.spec import defspec
 # "import xxxx" avoids circular imports
 import diffICP.core.calibration as calibration
 
-
 ##################################################################################
 ### Default visualization function : plot the current state of PSR model (GMM location, target points, trajectories etc.)
-
-matplotlib.use('TkAgg')
 
 def plot_state(PSR: MultiPSR, bounds, plot_GMM=True, plot_targets=True, plot_gridlines=True):
 
@@ -79,7 +76,8 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
     Launch ICP-based two-set registration. This function showcases the use of class DiffPSR (resp. AffinePSR).
 
     :param xA: first point set ("data", to register).
-    :param xB: second point set ("template", serves as centroids of a GMM model).
+    :param xB: second point set ("template", serves as centroids of a GMM model),
+        Possible HACK : xB can also be directly defined as a GMM model. Then set accordingly GMM_parameters = None.
 
     :param GMM_parameters: dict with main model parameters for the GMM part :
         GMM_parameters["sigma"] : float (initial value of GMM sigma parameter) or None (ad hoc initialization) ;
@@ -120,12 +118,18 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
         assert {"lambda_LDDMM","sigma_LDDMM"}.issubset(registration_parameters.keys()), \
             "if type=diffeomorphic, registration_parameters should define values of lambda_LDDMM and sigma_LDDMM"
 
-    assert {"optimize_sigma", "sigma"}.issubset(GMM_parameters.keys()), \
-        "GMM_parameters should at least define values of sigma (float>0) and optimize_sigma (True/False)"
+    # HACK to provide xB directly as a GMM model
+    is_GMM_B = isinstance(xB, GaussianMixtureUnif)
 
-    assert GMM_parameters["outlier_weight"] is None or \
-           GMM_parameters["outlier_weight"] == "optimize" or \
-           isinstance(GMM_parameters["outlier_weight"], (int,float)), \
+    if is_GMM_B:
+        assert GMM_parameters is None, \
+            "when using the 'xB=GMM' hack, set GMM_parameters=None (you can directly modify xB's GMM parameters if required)"
+    else:
+        assert {"optimize_sigma", "sigma"}.issubset(GMM_parameters.keys()), \
+            "GMM_parameters should at least define values of sigma (float>0) and optimize_sigma (True/False)"
+        assert GMM_parameters["outlier_weight"] is None or \
+               GMM_parameters["outlier_weight"] == "optimize" or \
+               isinstance(GMM_parameters["outlier_weight"], (int,float)), \
             "incorrect value for GMM_parameters['outlier_weight']"
 
     ######################
@@ -156,24 +160,31 @@ def ICP_two_set(xA, xB, GMM_parameters: dict, registration_parameters: dict,
 
     ### Read input point sets and various dimensions.
 
+    if is_GMM_B:
+        GMMi = copy.deepcopy(xB)
+        xB = GMMi.mu            # HACK: now let xB denote the centroids of GMMi
+
     D, DB = xA.shape[1], xB.shape[1]
     assert D == DB, "point sets xA and xB should have same vector dimension (dim 1)"
 
-    bounds = get_bounds(xA, xB, relmargin=0.1)
+    if plotstuff:
+        bounds = get_bounds(xA, xB, relmargin=0.1)
 
     ### Create the MultiPSR object (Diff or Affine) that will perform the registration
 
-    # GMM model
-    use_outliers = GMM_parameters.get("outlier_weight") is not None
-    GMMi = GaussianMixtureUnif(xB, use_outliers=use_outliers, sigma=GMM_parameters["sigma"])
-    if isinstance(GMM_parameters.get("outlier_weight"), (int, float)):
-        GMMi.outliers["eta0"] = GMM_parameters["outlier_weight"]
-    GMMi.to_optimize = {
-        "mu" : False,
-        "sigma" : GMM_parameters["optimize_sigma"],
-        "w" : False,
-        "eta0" : GMM_parameters.get("outlier_weight") == "optimize"
-    }
+    if not is_GMM_B:
+
+        # GMM model
+        use_outliers = GMM_parameters.get("outlier_weight") is not None
+        GMMi = GaussianMixtureUnif(xB, use_outliers=use_outliers, sigma=GMM_parameters["sigma"])
+        if isinstance(GMM_parameters.get("outlier_weight"), (int, float)):
+            GMMi.outliers["eta0"] = GMM_parameters["outlier_weight"]
+        GMMi.to_optimize = {
+            "mu" : False,
+            "sigma" : GMM_parameters["optimize_sigma"],
+            "w" : False,
+            "eta0" : GMM_parameters.get("outlier_weight") == "optimize"
+        }
 
     if is_diff:
 
@@ -301,6 +312,12 @@ if __name__ == '__main__':
     GMM_parameters = {"sigma": 0.1,
                       "optimize_sigma": True,
                       "outlier_weight": None}
+
+    if False:    # Try "GMM xB hack"
+        muB = 0.3 * torch.randn((7,2)) + 0.5
+        xB = GaussianMixtureUnif(muB, sigma=0.2).fix()
+        xB.to_optimize["sigma"] = True
+        GMM_parameters = None
 
     # Registration parameters
     registration_parameters = {"type": "diffeomorphic",     # or "similarity", ...

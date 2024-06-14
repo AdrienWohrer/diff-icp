@@ -30,7 +30,6 @@ import diffICP.core.calibration as calibration
 ##################################################################################
 ### Debug function : plot the current state of PSR model (template location, target points, trajectories etc.)
 
-matplotlib.use('TkAgg')
 def plot_state(PSR:DiffPSR_std, sigma=None, only_template=False):
     plt.clf()
     y1 = PSR.y1[:, 0]   # warped templates
@@ -287,9 +286,6 @@ if __name__ == '__main__':
     PSR, evol = \
         standard_atlas(x0, initial_template, model_parameters,
                     optim_options=optim_options, callback_function=callback_plot)
-
-    import matplotlib
-    matplotlib.use('TkAgg')
 
     def plot_with_template(template):
         plt.figure()

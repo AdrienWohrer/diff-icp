@@ -7,7 +7,6 @@ import os, time, math, warnings
 import numpy as np
 
 import matplotlib
-#matplotlib.use('TkAgg') # should normally be the case by default
 from matplotlib import pyplot as plt
 
 import torch

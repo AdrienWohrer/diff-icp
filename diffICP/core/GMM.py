@@ -141,6 +141,22 @@ class GaussianMixtureUnif(Module):
         else:
             raise ValueError(f"unkown computversion : {version}. Choices are 'keops' or 'torch'")
         self.computversion = version
+        return self
+
+    # ---------------------------------------
+
+    def fix(self):
+        '''
+        Shortcut function to ensure that the GMM model is fixed, without any optimized parameters
+        :return: self
+        '''
+        self.to_optimize = {
+            "sigma" : False,
+            "mu" : False,
+            "w" : False,
+            "eta0" : False
+        }
+        return self
 
     # ---------------------------------------
 
@@ -148,10 +164,11 @@ class GaussianMixtureUnif(Module):
         '''
         Set a "reference volume" for outlier distribution, from the bounding box of given data points X.
         :param X: torch.tensor of size (N,D) : data points
-        :return: None
+        :return: self
         '''
         if self.outliers is not None:
             self.outliers["vol0"] = (X.max(dim=0)[0]-X.min(dim=0)[0]).prod().item()
+        return self
 
     # ---------------------------------------
 
@@ -325,6 +342,9 @@ class GaussianMixtureUnif(Module):
           - i (number) : required number of EM iterations
         '''
 
+        if X.shape[0] == 0:
+            return torch.empty(X.shape,**defspec), torch.tensor(0.0), torch.tensor(0.0), 0  # TODO: possible spec clash ?
+
         Y, Cfe, FE, last_FE = None, None, None, None
         for i in range(max_iterations):
             Y, Cfe, FE = self.EM_step(X)
@@ -332,8 +352,35 @@ class GaussianMixtureUnif(Module):
                 # print(f"GMM optimization - reached required tolerance of {tol} in {i+1} EM steps")
                 return Y, Cfe, FE, i+1
             last_FE = FE
+            plt.clf()
         print(f"GMM optimization - reached maximum number of iterations : {max_iterations}")
         return Y, Cfe, FE, i+1
+
+    # -------------------------------
+
+    @staticmethod
+    def get_GMM_model(X, C, fixed_sigma=None, optimize_w=False, use_outliers=False, max_iterations=100, tol=1e-5, spec=defspec, computversion="keops"):
+        '''
+        Convenience function returning a GMM with C components, fitted to the data X. The GMM centroids
+        are randomly initialized from C points in the dataset, then EM_optimization is performed.
+
+        :param X: torch.tensor(N,D) - data points.
+        :param C: required number of components.
+        :param fixed_sigma: fixed value >0 [--> do not optimize sigma], or 0 [--> use default sigma, do not optimize] or None [--> optimize sigma].
+        :param optimize_w: if True, optimize component weights ; if False, use uniform component weights.
+        :param use_outliers: whether to add a uniform "outlier" component (whose weight is then also optimized)
+        :param max_iterations: maximum number of EM steps before break.
+        :param tol: (relative) numerical tolerance on EM free energy for break.
+        :return: the fitted GaussianMixtureModel object
+        '''
+        mu = X[torch.randint(0,X.shape[0],(C,)), :] # C random points from the point cloud
+        GMM = GaussianMixtureUnif(mu, use_outliers=use_outliers, spec=spec, computversion=computversion)
+        GMM.to_optimize = {'mu': True, 'sigma': True, 'w': optimize_w, 'eta0': True}
+        if fixed_sigma is not None:
+            GMM.to_optimize["sigma"] = False
+            GMM.sigma = fixed_sigma
+        GMM.EM_optimization(X, max_iterations=max_iterations, tol=tol)
+        return GMM
 
 
     #####################################################################################
@@ -701,7 +748,7 @@ if __name__ == '__main__':
 
     ### Test EM functions
 
-    if True:
+    if False:
 
         plt.ion()
 
@@ -843,7 +890,16 @@ if __name__ == '__main__':
 
             GMM.EM_step(x)
 
+    ### Test the convience shortcut static function : get_GMM_model
 
+    if True:
+        ## Create datapoints
+        N = 1000
+        t = torch.linspace(0, 2 * np.pi, N + 1)[:-1]
+        x = torch.stack((0.5 + 0.4 * (t / 7) * t.cos(), 0.5 + 0.3 * t.sin()), 1)
+        x = x + 0.1 * torch.randn(x.shape)  # for demo
+        C = 10
 
-
-
+        GMM = GaussianMixtureUnif.get_GMM_model(x, C, fixed_sigma=.001)
+        GMM.plot_bis(x)
+        plt.show()
